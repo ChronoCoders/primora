@@ -127,6 +127,8 @@ pub struct PartialProof {
     pub proof_hash: [u8; 32],
     /// Submission timestamp.
     pub submitted_at: DateTime<Utc>,
+    /// Node signature over the proof, present only after Full-mode signing.
+    pub signature: Option<Signature>,
 }
 
 /// A node's signature over an attested proof.
