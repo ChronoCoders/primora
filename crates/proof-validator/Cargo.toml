@@ -1,0 +1,8 @@
+[package]
+name = "proof-validator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+common = { path = "../common" }

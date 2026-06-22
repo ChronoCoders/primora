@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/common",
+  "crates/verification-service",
+  "crates/proof-validator",
+  "crates/anomaly-engine",
+  "crates/node-coordinator",
+  "crates/onchain-client",
+  "crates/session-manager",
+  "crates/rate-limiter",
+  "crates/mint-ceiling",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+serde = { version = "1", features = ["derive"] }
+alloy-primitives = { version = "1", features = ["serde"] }

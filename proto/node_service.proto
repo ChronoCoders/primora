@@ -1,0 +1,64 @@
+// Backend <-> node gRPC interface for proof metadata, session end, and attestation.
+syntax = "proto3";
+
+package primora.v1;
+
+import "google/protobuf/timestamp.proto";
+import "attestation.proto";
+
+// Metadata forwarded by the assigned node every 30s. Backend sees metadata + hash only, never the raw proof (Architecture 8.2).
+message PartialProofMetadata {
+  string session_id = 1;
+  string wallet = 2;
+  uint32 sequence = 3; // proof index in session
+  uint64 hashrate = 4; // H/s, integer
+  string client_type = 5; // Browser|Desktop|CLI
+  ProofHash proof_hash = 6;
+  google.protobuf.Timestamp timestamp = 7;
+}
+
+// Ack for SubmitProofMetadata.
+message SubmitProofMetadataResponse {
+  bool accepted = 1;
+  string reason = 2;
+}
+
+// Sent by the assigned node at session end with its proof set and signature (Architecture 8.3).
+message SessionEndedRequest {
+  string session_id = 1;
+  string wallet = 2;
+  string commodity = 3;
+  uint64 start_block = 4;
+  repeated ProofHash proof_set = 5;
+  NodeSignature node_sig = 6; // assigned node's signature, becomes attestation index 0
+  google.protobuf.Timestamp ended_at = 7;
+}
+
+// Ack for SessionEnded.
+message SessionEndedResponse {
+  bool accepted = 1;
+  string reason = 2;
+}
+
+// Sent by the backend to Node B and Node C requesting their signature (Architecture 8.3).
+message AttestationRequest {
+  string session_id = 1;
+  string wallet = 2;
+  string commodity = 3;
+  ProofHash proof_hash = 4;
+  string requesting_node_id = 5; // the assigned node
+  google.protobuf.Timestamp requested_at = 6;
+}
+
+// Node B/C reply.
+message AttestationResponse {
+  string session_id = 1;
+  bool valid = 2;
+  NodeSignature signature = 3; // present only when valid
+}
+
+service NodeService {
+  rpc SubmitProofMetadata(PartialProofMetadata) returns (SubmitProofMetadataResponse);
+  rpc SessionEnded(SessionEndedRequest) returns (SessionEndedResponse);
+  rpc RequestAttestation(AttestationRequest) returns (AttestationResponse);
+}

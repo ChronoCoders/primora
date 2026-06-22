@@ -1,0 +1,27 @@
+// Shared attestation types for the Primora 2-of-3 proof attestation scheme.
+syntax = "proto3";
+
+package primora.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// Wraps a proof hash.
+message ProofHash {
+  bytes value = 1; // 32 bytes
+}
+
+// A node's signature over a proof set.
+message NodeSignature {
+  string node_id = 1;
+  bytes signature = 2;
+  google.protobuf.Timestamp signed_at = 3;
+}
+
+// Assembled 2-of-3 attestation. >=2 signatures means sufficient.
+message AttestationResult {
+  string session_id = 1;
+  repeated NodeSignature signatures = 2; // index 0 = assigned node
+  repeated string node_ids = 3;
+  ProofHash proof_hash = 4;
+  google.protobuf.Timestamp timestamp = 5;
+}
