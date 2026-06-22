@@ -6,3 +6,7 @@ license.workspace = true
 
 [dependencies]
 common = { path = "../common" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+alloy-primitives = { workspace = true }
