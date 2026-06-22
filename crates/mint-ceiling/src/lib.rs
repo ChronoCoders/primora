@@ -2,7 +2,109 @@
 #![deny(missing_docs)]
 //! Daily mint ceiling calculation and proposal generation.
 
-/// Calculates the per-block PRM mint ceiling as a scaled integer.
-pub fn calculate_block_ceiling(_active_users: u64, _avg_daily_prm_per_user: u128) -> u128 {
-    todo!()
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+
+const BLOCKS_PER_DAY: u64 = 7_200;
+const SAFETY_MULTIPLIER: u64 = 3;
+
+/// A signed-off-elsewhere proposal describing a recalculated per-block ceiling.
+///
+/// This is the artifact written to Postgres and shown in the admin panel. The
+/// calculator never writes it anywhere.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CeilingProposal {
+    /// UTC time the proposal was computed.
+    pub calculated_at: DateTime<Utc>,
+    /// Active user count input.
+    pub active_users: u64,
+    /// Average daily PRM minted per user input, as a scaled integer.
+    pub avg_daily_prm_per_user: u64,
+    /// Daily target mint, as a scaled integer.
+    pub daily_target_prm: u64,
+    /// Resulting per-block ceiling, as a scaled integer.
+    pub block_ceiling: u64,
+    /// Blocks per day assumed in the calculation.
+    pub blocks_per_day: u64,
+    /// Safety multiplier applied to the per-block target.
+    pub safety_multiplier: u64,
+}
+
+/// Computes the dynamic per-block PRM mint ceiling.
+pub struct MintCeilingCalculator {
+    blocks_per_day: u64,
+    safety_multiplier: u64,
+}
+
+impl MintCeilingCalculator {
+    /// Creates a calculator with the Phase 1 Ethereum constants.
+    pub fn new() -> Self {
+        Self {
+            blocks_per_day: BLOCKS_PER_DAY,
+            safety_multiplier: SAFETY_MULTIPLIER,
+        }
+    }
+
+    /// Returns the per-block ceiling for the given inputs.
+    ///
+    /// Integer division truncates, which is acceptable and intentional.
+    pub fn calculate(&self, active_users: u64, avg_daily_prm_per_user: u64) -> u64 {
+        let daily_target = active_users * avg_daily_prm_per_user;
+        (daily_target / self.blocks_per_day) * self.safety_multiplier
+    }
+
+    /// Builds a [`CeilingProposal`] for the given inputs at the current UTC time.
+    pub fn propose(&self, active_users: u64, avg_daily_prm_per_user: u64) -> CeilingProposal {
+        let daily_target_prm = active_users * avg_daily_prm_per_user;
+        let block_ceiling = self.calculate(active_users, avg_daily_prm_per_user);
+        CeilingProposal {
+            calculated_at: Utc::now(),
+            active_users,
+            avg_daily_prm_per_user,
+            daily_target_prm,
+            block_ceiling,
+            blocks_per_day: self.blocks_per_day,
+            safety_multiplier: self.safety_multiplier,
+        }
+    }
+}
+
+impl Default for MintCeilingCalculator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_calculate_basic() {
+        let calc = MintCeilingCalculator::new();
+        assert_eq!(calc.calculate(1_000, 500), 207);
+    }
+
+    #[test]
+    fn test_calculate_zero_users() {
+        let calc = MintCeilingCalculator::new();
+        assert_eq!(calc.calculate(0, 500), 0);
+    }
+
+    #[test]
+    fn test_calculate_large() {
+        let calc = MintCeilingCalculator::new();
+        assert_eq!(calc.calculate(10_000, 1_000), 4_164);
+    }
+
+    #[test]
+    fn test_propose_returns_correct_fields() {
+        let calc = MintCeilingCalculator::new();
+        let proposal = calc.propose(500, 300);
+        assert_eq!(proposal.active_users, 500);
+        assert_eq!(proposal.avg_daily_prm_per_user, 300);
+        assert_eq!(proposal.blocks_per_day, 7_200);
+        assert_eq!(proposal.safety_multiplier, 3);
+        assert_eq!(proposal.block_ceiling, calc.calculate(500, 300));
+    }
 }
