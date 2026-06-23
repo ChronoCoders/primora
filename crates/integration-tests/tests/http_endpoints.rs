@@ -33,5 +33,5 @@ async fn test_metrics_endpoint() {
     let Ok(body) = response.text().await else {
         panic!("failed to read /metrics body");
     };
-    assert!(body.contains("proof_submissions_total"));
+    assert!(body.contains("session_active_count"));
 }
