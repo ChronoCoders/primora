@@ -10,6 +10,7 @@ members = [
   "crates/session-manager",
   "crates/rate-limiter",
   "crates/mint-ceiling",
+  "crates/twap-calculator",
 ]
 
 [workspace.package]

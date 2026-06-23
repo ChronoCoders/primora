@@ -1,0 +1,10 @@
+[package]
+name = "twap-calculator"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+common = { path = "../common" }
+chrono = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
