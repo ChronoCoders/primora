@@ -58,7 +58,7 @@ services:
       REDIS_URL: redis://redis:6379
       BIND_ADDR: 0.0.0.0:3000
       CHAIN_ID: "1"
-      RPC_URL: https://eth-mainnet.g.alchemy.com/v2/demo
+      RPC_URL: ${RPC_URL:-https://eth-mainnet.g.alchemy.com/v2/demo}
       SIGNING_KEY_HEX: "0000000000000000000000000000000000000000000000000000000000000001"
       NODE_ENDPOINTS: ""
       LOG_LEVEL: info
