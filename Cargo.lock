@@ -2400,7 +2400,12 @@ dependencies = [
 name = "node-coordinator"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
+ "chrono",
  "common",
+ "sha2",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

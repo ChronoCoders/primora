@@ -21,7 +21,7 @@ license = "MIT"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 serde = { version = "1", features = ["derive"] }
 alloy-primitives = { version = "1", features = ["serde"] }
-tokio = { version = "1", features = ["sync", "rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["sync", "rt-multi-thread", "macros", "time"] }
 tracing = "0.1"
 redis = { version = "0.25", features = ["tokio-comp"] }
 uuid = { version = "1", features = ["v4"] }
