@@ -20,10 +20,13 @@ const ATTESTATION_TIMEOUT_SECS: u64 = 15;
 /// Abstraction over a node attestation transport. The real Tonic gRPC client
 /// implements this in a later change; mocks implement it for testing.
 pub trait NodeClient: Send + Sync {
-    /// Requests an attestation signature from `node_id` over `proof_set`.
+    /// Requests an attestation signature from `target_node_id` over `proof_set`,
+    /// identifying `assigned_node_id` as the node that produced the assigned
+    /// signature this attestation is built around.
     fn request_attestation(
         &self,
-        node_id: &NodeId,
+        target_node_id: &NodeId,
+        assigned_node_id: &NodeId,
         proof_set: &[PartialProof],
     ) -> impl Future<Output = Result<NodeSignature, NodeCoordinatorError>> + Send;
 }
@@ -115,12 +118,17 @@ impl<C: NodeClient> NodeCoordinator<C> {
 
     async fn try_request(
         &self,
-        node_id: &NodeId,
+        target_node_id: &NodeId,
+        assigned_node_id: &NodeId,
         proof_set: &[PartialProof],
         timeout: Duration,
     ) -> Option<NodeSignature> {
-        match tokio::time::timeout(timeout, self.client.request_attestation(node_id, proof_set))
-            .await
+        match tokio::time::timeout(
+            timeout,
+            self.client
+                .request_attestation(target_node_id, assigned_node_id, proof_set),
+        )
+        .await
         {
             Ok(Ok(signature)) => Some(signature),
             _ => None,
@@ -142,11 +150,11 @@ impl<C: NodeClient> NodeCoordinator<C> {
         let timeout = Duration::from_secs(self.attestation_timeout_secs);
         let responses: Vec<Option<NodeSignature>> = match selected.as_slice() {
             [] => Vec::new(),
-            [a] => vec![self.try_request(a, &proof_set, timeout).await],
+            [a] => vec![self.try_request(a, assigned_node_id, &proof_set, timeout).await],
             [a, b, ..] => {
                 let (ra, rb) = tokio::join!(
-                    self.try_request(a, &proof_set, timeout),
-                    self.try_request(b, &proof_set, timeout),
+                    self.try_request(a, assigned_node_id, &proof_set, timeout),
+                    self.try_request(b, assigned_node_id, &proof_set, timeout),
                 );
                 vec![ra, rb]
             }
@@ -193,11 +201,12 @@ mod tests {
     impl NodeClient for MockNodeClient {
         fn request_attestation(
             &self,
-            node_id: &NodeId,
+            target_node_id: &NodeId,
+            _assigned_node_id: &NodeId,
             _proof_set: &[PartialProof],
         ) -> impl Future<Output = Result<NodeSignature, NodeCoordinatorError>> + Send {
             let result = match self {
-                MockNodeClient::AlwaysSucceed => Ok(dummy_sig(&node_id.0)),
+                MockNodeClient::AlwaysSucceed => Ok(dummy_sig(&target_node_id.0)),
                 MockNodeClient::AlwaysFail => {
                     Err(NodeCoordinatorError::NodeError("mock failure".to_string()))
                 }

@@ -71,9 +71,16 @@ impl GrpcNodeClient {
 impl NodeClient for GrpcNodeClient {
     async fn request_attestation(
         &self,
-        node_id: &NodeId,
+        target_node_id: &NodeId,
+        assigned_node_id: &NodeId,
         proof_set: &[PartialProof],
     ) -> Result<NodeSignature, NodeCoordinatorError> {
+        tracing::debug!(
+            target_node = %target_node_id.0,
+            assigned_node = %assigned_node_id.0,
+            endpoint = %self.endpoint,
+            "requesting attestation"
+        );
         let proof_hash = hash_proof_set(proof_set);
         let request_body = proto::AttestationRequest {
             session_id: proof_set
@@ -88,7 +95,7 @@ impl NodeClient for GrpcNodeClient {
             proof_hash: Some(proto::ProofHash {
                 value: proof_hash.to_vec(),
             }),
-            requesting_node_id: node_id.0.clone(),
+            requesting_node_id: assigned_node_id.0.clone(),
             requested_at: None,
         };
 
@@ -107,7 +114,7 @@ impl NodeClient for GrpcNodeClient {
         if !response.valid {
             return Err(NodeCoordinatorError::NodeError(format!(
                 "node {} reported an invalid attestation",
-                node_id.0
+                target_node_id.0
             )));
         }
 
