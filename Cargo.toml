@@ -40,3 +40,4 @@ prost-types = "0.13"
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono", "uuid", "migrate", "json"] }
 prometheus = { version = "0.13", features = ["process"] }
 once_cell = "1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
