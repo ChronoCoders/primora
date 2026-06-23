@@ -5036,14 +5036,17 @@ checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 name = "verification-service"
 version = "0.1.0"
 dependencies = [
+ "alloy",
  "alloy-primitives",
  "anomaly-engine",
  "axum",
  "chrono",
  "common",
+ "metrics",
  "mint-ceiling",
  "node-coordinator",
  "onchain-client",
+ "postgres-store",
  "proof-validator",
  "rate-limiter",
  "serde",
@@ -5052,6 +5055,7 @@ dependencies = [
  "tokio",
  "tower-http 0.5.2",
  "tracing",
+ "twap-calculator",
 ]
 
 [[package]]

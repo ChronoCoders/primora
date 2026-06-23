@@ -2,10 +2,11 @@
 #![deny(missing_docs)]
 //! Axum entry point: router, application state, and request routing.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use alloy_primitives::Address;
+use alloy_primitives::{Address, Signature, U256};
 use axum::extract::{ConnectInfo, Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -13,27 +14,45 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::Utc;
 use common::{
-    ClientType, PartialProof, ProofValidator, SessionContext, SessionId, ValidationMode,
-    ValidationResult,
+    AnomalyEvent, ClientType, Commodity, InvalidReason, MintProposal, NodeId, NodeSignature,
+    PartialProof, ProofValidator, ProposalStatus, SessionContext, SessionId, SuspicionLevel,
+    ValidationMode, ValidationResult,
 };
 use proof_validator::PreFilterValidator;
 use rate_limiter::RateLimitResult;
 use serde::{Deserialize, Serialize};
+use tokio::sync::RwLock;
+use twap_calculator::{OracleSource, PriceSample, TwapCalculator};
 use tower_http::trace::TraceLayer;
+
+/// Placeholder oracle price used until real oracle reads are wired in.
+const PLACEHOLDER_XAU_PRICE: u128 = 320_400_000_000;
+/// Placeholder assigned node identifier used until real node assignment exists.
+const PLACEHOLDER_ASSIGNED_NODE: &str = "node-jhb-001";
+/// Number of blocks behind the head used to derive the session seed.
+const SEED_BLOCK_OFFSET: u64 = 3;
 
 /// Shared application state injected into every handler.
 #[derive(Clone)]
 pub struct AppState {
-    /// Redis-backed session store.
+    /// Session store backed by Redis.
     pub session_manager: Arc<session_manager::SessionStore>,
-    /// Per-wallet, per-IP, per-node rate limiter.
+    /// Rate limiter backed by Redis.
     pub rate_limiter: Arc<rate_limiter::RateLimiter>,
-    /// Anomaly scoring and event publisher.
+    /// Anomaly scoring engine.
     pub anomaly_engine: Arc<anomaly_engine::AnomalyEngine>,
-    /// Per-block mint ceiling calculator.
+    /// Mint ceiling calculator.
     pub mint_ceiling: Arc<mint_ceiling::MintCeilingCalculator>,
-    /// Read-only on-chain client.
+    /// On-chain client for block queries and proposal signing.
     pub onchain_client: Arc<onchain_client::OnchainClient>,
+    /// Postgres store for anomaly events and mint proposals.
+    pub postgres_store: Arc<postgres_store::PostgresStore>,
+    /// Node coordinator for 2-of-3 attestation.
+    pub node_coordinator: Arc<node_coordinator::NodeCoordinator<node_coordinator::GrpcNodeClient>>,
+    /// Backend signing key for mint proposals.
+    pub signing_key: Arc<alloy::signers::local::PrivateKeySigner>,
+    /// TWAP calculators keyed by session id, guarded for concurrent access.
+    pub twap_sessions: Arc<RwLock<HashMap<String, TwapCalculator>>>,
 }
 
 /// Request body for creating a session.
@@ -156,6 +175,13 @@ impl From<rate_limiter::RateLimiterError> for ApiError {
     }
 }
 
+impl From<onchain_client::OnchainClientError> for ApiError {
+    fn from(e: onchain_client::OnchainClientError) -> Self {
+        tracing::error!(error = %e, "onchain client error");
+        Self::Internal
+    }
+}
+
 /// Parses the client type from its lowercase string label.
 fn parse_client_type(raw: &str) -> Result<ClientType, ApiError> {
     match raw.to_ascii_lowercase().as_str() {
@@ -213,12 +239,27 @@ async fn create_session(
         .set_commit(&session_id, commit_hash)
         .await?;
 
+    {
+        let mut map = state.twap_sessions.write().await;
+        map.insert(session_id.0.clone(), TwapCalculator::new(Utc::now()));
+    }
+    metrics::SESSION_ACTIVE_COUNT.inc();
+
     Ok((
         StatusCode::CREATED,
         Json(CreateSessionResponse {
             session_id: session_id.0,
         }),
     ))
+}
+
+/// Returns the metric label for a validation result.
+fn result_label(result: &ValidationResult) -> &'static str {
+    match result {
+        ValidationResult::Valid => "Valid",
+        ValidationResult::Invalid(_) => "Invalid",
+        ValidationResult::Suspicious(_) => "Suspicious",
+    }
 }
 
 /// Submits a partial proof: loads the session, runs the pre-filter validator,
@@ -250,10 +291,50 @@ async fn submit_proof(
     let result = PreFilterValidator.validate(&proof, ValidationMode::PreFilter, &ctx);
     state.session_manager.increment_proof_count(&session_id).await?;
 
+    let client_type_label = format!("{:?}", ctx.client_type);
+    metrics::PROOF_SUBMISSIONS_TOTAL
+        .with_label_values(&[client_type_label.as_str(), result_label(&result)])
+        .inc();
+
     let accepted = !matches!(result, ValidationResult::Invalid(_));
+    let triggers: Vec<InvalidReason> = match &result {
+        ValidationResult::Invalid(reason) => vec![reason.clone()],
+        ValidationResult::Valid | ValidationResult::Suspicious(_) => Vec::new(),
+    };
     let level = state
         .anomaly_engine
-        .process(session_id, ctx.wallet, vec![result]);
+        .process(session_id.clone(), ctx.wallet, vec![result]);
+
+    if level != SuspicionLevel::Low {
+        let event = AnomalyEvent {
+            session_id: session_id.clone(),
+            wallet: ctx.wallet,
+            score: 0,
+            triggers: triggers.clone(),
+            level,
+            timestamp: Utc::now(),
+        };
+        if let Err(e) = state.postgres_store.insert_anomaly_event(&event).await {
+            tracing::error!(error = %e, "failed to persist anomaly event");
+        }
+        let trigger_label = triggers
+            .first()
+            .map_or_else(|| "none".to_string(), |reason| format!("{reason:?}"));
+        metrics::ANOMALY_EVENTS_TOTAL
+            .with_label_values(&[format!("{level:?}").as_str(), trigger_label.as_str()])
+            .inc();
+    }
+
+    {
+        let mut map = state.twap_sessions.write().await;
+        if let Some(calculator) = map.get_mut(&session_id.0) {
+            calculator.add_sample(PriceSample {
+                price: PLACEHOLDER_XAU_PRICE,
+                sampled_at: Utc::now(),
+                oracle: OracleSource::Chainlink,
+            });
+        }
+    }
 
     Ok(Json(SubmitProofResponse {
         accepted,
@@ -261,21 +342,23 @@ async fn submit_proof(
     }))
 }
 
-/// Ends a session: verifies the commit-reveal nonce and, on success, finalizes
-/// the session.
+/// Ends a session: verifies the commit-reveal nonce, finalizes the session TWAP,
+/// derives the on-chain seed, coordinates 2-of-3 node attestation, and persists a
+/// signed mint proposal.
 ///
-/// A nonce that does not match the stored commit returns `status: "rejected"`.
+/// Returns `status: "rejected"` (400) on a nonce mismatch, `status: "no_samples"`
+/// (400) when no TWAP samples were collected, `status: "completed"` (200) on a
+/// successful attestation, and `status: "attestation_failed"` (500) when
+/// attestation does not reach the required signature threshold.
 ///
-/// TODO(attestation): on a verified reveal this must collect the session proof
-/// set, run [`node_coordinator::NodeCoordinator::coordinate_attestation`], and
-/// produce a signed [`common::MintProposal`]. That path is blocked on the gRPC
-/// `NodeClient` implementation, the backend signing key in [`AppState`], and the
-/// eligible-node configuration, none of which exist yet.
+/// The node assignment, proof set, assigned-node signature, gross PRM, and
+/// backing commodity are Phase 1 placeholders pending real node assignment and
+/// oracle integration.
 async fn end_session(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
     Json(body): Json<EndSessionRequest>,
-) -> Result<Json<EndSessionResponse>, ApiError> {
+) -> Result<(StatusCode, Json<EndSessionResponse>), ApiError> {
     let session_id = SessionId(session_id);
     let ctx = state
         .session_manager
@@ -287,18 +370,109 @@ async fn end_session(
 
     let verified = state.session_manager.verify_reveal(&session_id, &nonce).await?;
     if !verified {
-        return Ok(Json(EndSessionResponse {
-            status: "rejected".to_string(),
-        }));
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(EndSessionResponse {
+                status: "rejected".to_string(),
+            }),
+        ));
     }
 
-    state
-        .session_manager
-        .delete_session(&ctx.wallet, &session_id)
-        .await?;
-    Ok(Json(EndSessionResponse {
-        status: "verified".to_string(),
-    }))
+    let calculator = {
+        let mut map = state.twap_sessions.write().await;
+        map.remove(&session_id.0)
+    };
+    let twap = match calculator.and_then(|calc| calc.finalize(Utc::now())) {
+        Some(result) => result,
+        None => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(EndSessionResponse {
+                    status: "no_samples".to_string(),
+                }),
+            ));
+        }
+    };
+    if !twap.is_valid {
+        tracing::warn!(session = %session_id.0, "twap session below minimum valid duration");
+    }
+
+    let block_number = state.onchain_client.get_block_number().await?;
+    let seed = match state
+        .onchain_client
+        .get_block_hash(block_number.saturating_sub(SEED_BLOCK_OFFSET))
+        .await?
+    {
+        Some(hash) => hash,
+        None => {
+            tracing::warn!(block = block_number, "seed block hash unavailable, using zero seed");
+            [0u8; 32]
+        }
+    };
+
+    let assigned_node_id = NodeId(PLACEHOLDER_ASSIGNED_NODE.to_string());
+    let assigned_node_sig = NodeSignature {
+        node_id: assigned_node_id.clone(),
+        signature: Signature::new(U256::ZERO, U256::ZERO, false),
+        signed_at: Utc::now(),
+    };
+
+    let attestation = state
+        .node_coordinator
+        .coordinate_attestation(
+            session_id.clone(),
+            assigned_node_sig,
+            Vec::new(),
+            seed,
+            &assigned_node_id,
+        )
+        .await;
+
+    match attestation {
+        Ok(attestation_result) => {
+            let proposal = MintProposal {
+                session_id: session_id.clone(),
+                wallet: ctx.wallet,
+                gross_prm: 0,
+                commodity: Commodity::Gold,
+                attestation: attestation_result,
+                backend_sig: Signature::new(U256::ZERO, U256::ZERO, false),
+                created_at: Utc::now(),
+                status: ProposalStatus::Pending,
+            };
+            if let Err(e) = state.postgres_store.insert_mint_proposal(&proposal).await {
+                tracing::error!(error = %e, "failed to persist mint proposal");
+            }
+            metrics::MINT_PROPOSALS_TOTAL
+                .with_label_values(&["Pending"])
+                .inc();
+            metrics::SESSION_ACTIVE_COUNT.dec();
+            state
+                .session_manager
+                .delete_session(&ctx.wallet, &session_id)
+                .await?;
+            Ok((
+                StatusCode::OK,
+                Json(EndSessionResponse {
+                    status: "completed".to_string(),
+                }),
+            ))
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "attestation failed");
+            Ok((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(EndSessionResponse {
+                    status: "attestation_failed".to_string(),
+                }),
+            ))
+        }
+    }
+}
+
+/// Exposes the Prometheus metrics registry in text exposition format.
+pub async fn metrics_handler() -> (StatusCode, String) {
+    (StatusCode::OK, metrics::metrics_handler())
 }
 
 /// Liveness probe.
@@ -316,6 +490,7 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions/:session_id/proofs", post(submit_proof))
         .route("/sessions/:session_id/end", post(end_session))
         .route("/health", get(health_check))
+        .route("/metrics", get(metrics_handler))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -370,6 +545,13 @@ mod tests {
             parse_hash("00", "h"),
             Err(ApiError::BadRequest(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn test_metrics_endpoint_returns_ok() {
+        let (status, body) = metrics_handler().await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!body.is_empty());
     }
 
     #[test]

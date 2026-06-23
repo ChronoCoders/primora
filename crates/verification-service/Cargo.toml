@@ -13,6 +13,10 @@ mint-ceiling = { path = "../mint-ceiling" }
 onchain-client = { path = "../onchain-client" }
 node-coordinator = { path = "../node-coordinator" }
 proof-validator = { path = "../proof-validator" }
+postgres-store = { path = "../postgres-store" }
+metrics = { path = "../metrics" }
+twap-calculator = { path = "../twap-calculator" }
+alloy = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
