@@ -3,7 +3,7 @@
 //! Redis-backed commit-reveal and session lifecycle management.
 
 use alloy_primitives::Address;
-use common::{SessionContext, SessionId};
+use common::{PartialProof, SessionContext, SessionId};
 use redis::aio::MultiplexedConnection;
 use sha2::{Digest, Sha256};
 
@@ -169,6 +169,47 @@ impl SessionStore {
         Ok(computed == stored)
     }
 
+    /// Appends a partial proof to the session's stored proof list, refreshing the
+    /// one-hour TTL. Proofs are persisted as a JSON array under `proofs:{id}`.
+    pub async fn store_proof(
+        &self,
+        session_id: &SessionId,
+        proof: PartialProof,
+    ) -> Result<(), SessionManagerError> {
+        let mut conn = self.conn.clone();
+        let key = format!("proofs:{}", session_id.0);
+        let existing: Option<String> = redis::cmd("GET").arg(&key).query_async(&mut conn).await?;
+        let mut proofs: Vec<PartialProof> = match existing {
+            Some(payload) => serde_json::from_str(&payload)?,
+            None => Vec::new(),
+        };
+        proofs.push(proof);
+        let payload = serde_json::to_string(&proofs)?;
+        let _: () = redis::cmd("SET")
+            .arg(&key)
+            .arg(&payload)
+            .arg("EX")
+            .arg(TTL_SECS)
+            .query_async(&mut conn)
+            .await?;
+        Ok(())
+    }
+
+    /// Returns all partial proofs stored for a session, or an empty vector when
+    /// none have been recorded.
+    pub async fn get_proofs(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Vec<PartialProof>, SessionManagerError> {
+        let mut conn = self.conn.clone();
+        let key = format!("proofs:{}", session_id.0);
+        let payload: Option<String> = redis::cmd("GET").arg(&key).query_async(&mut conn).await?;
+        match payload {
+            Some(p) => Ok(serde_json::from_str(&p)?),
+            None => Ok(Vec::new()),
+        }
+    }
+
     /// Increments and returns the proof counter for a session.
     pub async fn increment_proof_count(
         &self,
@@ -218,11 +259,13 @@ impl SessionStore {
         let lookup_key = format!("session_lookup:{}", session_id.0);
         let commit_key = format!("commit:{}", session_id.0);
         let count_key = format!("proof_count:{}", session_id.0);
+        let proofs_key = format!("proofs:{}", session_id.0);
         let _: () = redis::cmd("DEL")
             .arg(&session_key)
             .arg(&lookup_key)
             .arg(&commit_key)
             .arg(&count_key)
+            .arg(&proofs_key)
             .query_async(&mut conn)
             .await?;
         Ok(())
@@ -245,6 +288,8 @@ mod tests {
             active_sessions_count: 0,
             last_submission_at: None,
             recent_proof_count: 0,
+            assigned_node_id: None,
+            commodity: common::Commodity::Gold,
         }
     }
 

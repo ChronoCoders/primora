@@ -1,7 +1,7 @@
 use alloy_primitives::{Address, Signature, U256};
 use chrono::{Duration, Utc};
 use common::{
-    ClientType, InvalidReason, PartialProof, ProofValidator, SessionContext, SessionId,
+    ClientType, Commodity, InvalidReason, PartialProof, ProofValidator, SessionContext, SessionId,
     SuspicionLevel, ValidationMode, ValidationResult,
 };
 use proof_validator::PreFilterValidator;
@@ -14,6 +14,8 @@ fn ctx(client_type: ClientType, active_sessions_count: u32, last: Option<chrono:
         active_sessions_count,
         last_submission_at: last,
         recent_proof_count: 5,
+        assigned_node_id: None,
+        commodity: Commodity::Gold,
     }
 }
 

@@ -110,6 +110,10 @@ pub struct SessionContext {
     pub last_submission_at: Option<DateTime<Utc>>,
     /// Count of recent proofs observed in this session.
     pub recent_proof_count: u32,
+    /// Node assigned to this session at creation. `None` until a node is assigned.
+    pub assigned_node_id: Option<NodeId>,
+    /// Commodity this session mines toward.
+    pub commodity: Commodity,
 }
 
 /// A partial proof submitted every 30s.

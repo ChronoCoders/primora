@@ -27,8 +27,6 @@ use tower_http::trace::TraceLayer;
 
 /// Placeholder oracle price used until real oracle reads are wired in.
 const PLACEHOLDER_XAU_PRICE: u128 = 320_400_000_000;
-/// Placeholder assigned node identifier used until real node assignment exists.
-const PLACEHOLDER_ASSIGNED_NODE: &str = "node-jhb-001";
 /// Number of blocks behind the head used to derive the session seed.
 const SEED_BLOCK_OFFSET: u64 = 3;
 
@@ -64,6 +62,10 @@ pub struct CreateSessionRequest {
     pub client_type: String,
     /// Hex-encoded commit hash (`sha256(nonce)`) for the commit-reveal scheme.
     pub commit_hash: String,
+    /// Identifier of the node assigned to this session, if known at creation.
+    pub assigned_node_id: Option<String>,
+    /// Backing commodity: `Gold`, `Silver`, `Platinum`, or `Oil`.
+    pub commodity: String,
 }
 
 /// Response body for a created session.
@@ -192,6 +194,17 @@ fn parse_client_type(raw: &str) -> Result<ClientType, ApiError> {
     }
 }
 
+/// Parses the backing commodity from its label, defaulting to gold for any
+/// unrecognized value.
+fn parse_commodity(raw: &str) -> Commodity {
+    match raw.to_ascii_lowercase().as_str() {
+        "silver" => Commodity::Silver,
+        "platinum" => Commodity::Platinum,
+        "oil" | "crudeoil" | "crude_oil" => Commodity::CrudeOil,
+        _ => Commodity::Gold,
+    }
+}
+
 /// Decodes a hex string into a 32-byte hash.
 fn parse_hash(raw: &str, field: &'static str) -> Result<[u8; 32], ApiError> {
     let bytes = alloy_primitives::hex::decode(raw).map_err(|_| ApiError::BadRequest(field))?;
@@ -219,6 +232,8 @@ async fn create_session(
         .map_err(|_| ApiError::BadRequest("invalid wallet address"))?;
     let client_type = parse_client_type(&body.client_type)?;
     let commit_hash = parse_hash(&body.commit_hash, "invalid commit_hash")?;
+    let commodity = parse_commodity(&body.commodity);
+    let assigned_node_id = body.assigned_node_id.map(NodeId);
 
     let ip = peer.ip();
     enforce(state.rate_limiter.check_wallet(&wallet).await?)?;
@@ -232,6 +247,8 @@ async fn create_session(
         active_sessions_count,
         last_submission_at: None,
         recent_proof_count: 0,
+        assigned_node_id,
+        commodity,
     };
     let session_id = state.session_manager.create_session(&ctx).await?;
     state
@@ -290,6 +307,7 @@ async fn submit_proof(
     };
     let result = PreFilterValidator.validate(&proof, ValidationMode::PreFilter, &ctx);
     state.session_manager.increment_proof_count(&session_id).await?;
+    state.session_manager.store_proof(&session_id, proof).await?;
 
     let client_type_label = format!("{:?}", ctx.client_type);
     metrics::PROOF_SUBMISSIONS_TOTAL
@@ -343,17 +361,18 @@ async fn submit_proof(
 }
 
 /// Ends a session: verifies the commit-reveal nonce, finalizes the session TWAP,
-/// derives the on-chain seed, coordinates 2-of-3 node attestation, and persists a
-/// signed mint proposal.
+/// derives the on-chain seed, coordinates 2-of-3 node attestation, signs the
+/// resulting mint proposal with the backend key, and persists it.
 ///
-/// Returns `status: "rejected"` (400) on a nonce mismatch, `status: "no_samples"`
-/// (400) when no TWAP samples were collected, `status: "completed"` (200) on a
-/// successful attestation, and `status: "attestation_failed"` (500) when
-/// attestation does not reach the required signature threshold.
+/// The assigned node, proof set, gross PRM, and backing commodity are taken from
+/// real session state. The assigned-node signature remains a placeholder until
+/// the node binary exists; see the inline TODO.
 ///
-/// The node assignment, proof set, assigned-node signature, gross PRM, and
-/// backing commodity are Phase 1 placeholders pending real node assignment and
-/// oracle integration.
+/// Returns `status: "rejected"` (400) on a nonce mismatch, `status:
+/// "no_assigned_node"` (400) when the session has no assigned node, `status:
+/// "no_samples"` (400) when no TWAP samples were collected, `status: "completed"`
+/// (200) on a successful attestation, and `status: "attestation_failed"` (500)
+/// when attestation does not reach the required signature threshold.
 async fn end_session(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
@@ -378,6 +397,15 @@ async fn end_session(
         ));
     }
 
+    let Some(assigned_node_id) = ctx.assigned_node_id.clone() else {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(EndSessionResponse {
+                status: "no_assigned_node".to_string(),
+            }),
+        ));
+    };
+
     let calculator = {
         let mut map = state.twap_sessions.write().await;
         map.remove(&session_id.0)
@@ -397,6 +425,8 @@ async fn end_session(
         tracing::warn!(session = %session_id.0, "twap session below minimum valid duration");
     }
 
+    let proof_set = state.session_manager.get_proofs(&session_id).await?;
+
     let block_number = state.onchain_client.get_block_number().await?;
     let seed = match state
         .onchain_client
@@ -410,7 +440,9 @@ async fn end_session(
         }
     };
 
-    let assigned_node_id = NodeId(PLACEHOLDER_ASSIGNED_NODE.to_string());
+    // TODO(phase2-node): retrieve real NodeSignature from assigned node via gRPC
+    // The assigned node sends its NodeSignature with SessionEnded message.
+    // Until node binary exists, use placeholder.
     let assigned_node_sig = NodeSignature {
         node_id: assigned_node_id.clone(),
         signature: Signature::new(U256::ZERO, U256::ZERO, false),
@@ -422,7 +454,7 @@ async fn end_session(
         .coordinate_attestation(
             session_id.clone(),
             assigned_node_sig,
-            Vec::new(),
+            proof_set,
             seed,
             &assigned_node_id,
         )
@@ -430,16 +462,31 @@ async fn end_session(
 
     match attestation {
         Ok(attestation_result) => {
-            let proposal = MintProposal {
+            let duration_secs =
+                (twap.session_end - twap.session_start).num_seconds().max(0) as u128;
+            // TODO(phase2-formula): replace with full payout formula from Spec Section 4.6
+            // gross_prm = (hashrate * duration * base_coefficient) / difficulty
+            let gross_prm = twap.twap.saturating_mul(duration_secs);
+
+            let mut proposal = MintProposal {
                 session_id: session_id.clone(),
                 wallet: ctx.wallet,
-                gross_prm: 0,
-                commodity: Commodity::Gold,
+                gross_prm,
+                commodity: ctx.commodity,
                 attestation: attestation_result,
                 backend_sig: Signature::new(U256::ZERO, U256::ZERO, false),
                 created_at: Utc::now(),
                 status: ProposalStatus::Pending,
             };
+            let signature_bytes = onchain_client::OnchainClient::sign_proposal(
+                &proposal,
+                state.signing_key.as_ref(),
+            )?;
+            proposal.backend_sig = Signature::try_from(signature_bytes.as_ref()).map_err(|e| {
+                tracing::error!(error = %e, "invalid backend signature bytes");
+                ApiError::Internal
+            })?;
+
             if let Err(e) = state.postgres_store.insert_mint_proposal(&proposal).await {
                 tracing::error!(error = %e, "failed to persist mint proposal");
             }

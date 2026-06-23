@@ -106,6 +106,8 @@ mod tests {
             active_sessions_count: active,
             last_submission_at: last,
             recent_proof_count: 0,
+            assigned_node_id: None,
+            commodity: common::Commodity::Gold,
         }
     }
 
