@@ -1,0 +1,20 @@
+[package]
+name = "integration-tests"
+version = "0.1.0"
+edition = "2021"
+
+[dev-dependencies]
+common = { path = "../common" }
+session-manager = { path = "../session-manager" }
+rate-limiter = { path = "../rate-limiter" }
+postgres-store = { path = "../postgres-store" }
+twap-calculator = { path = "../twap-calculator" }
+anomaly-engine = { path = "../anomaly-engine" }
+proof-validator = { path = "../proof-validator" }
+tokio = { workspace = true }
+chrono = { workspace = true }
+alloy-primitives = { workspace = true }
+uuid = { workspace = true }
+reqwest = { version = "0.12", features = ["json"] }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
