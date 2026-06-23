@@ -2,6 +2,10 @@
 #![deny(missing_docs)]
 //! Node attestation orchestration: selection, parallel requests, and result assembly.
 
+pub mod grpc;
+
+pub use grpc::GrpcNodeClient;
+
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;

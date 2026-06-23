@@ -31,3 +31,6 @@ uuid = { version = "1", features = ["v4"] }
 serde_json = "1"
 sha2 = "0.10"
 alloy = { version = "2.1", features = ["providers", "rpc-types", "signers", "signer-local", "reqwest"] }
+tonic = { version = "0.12", features = ["tls"] }
+prost = "0.13"
+prost-types = "0.13"
