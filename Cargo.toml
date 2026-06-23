@@ -14,6 +14,7 @@ members = [
   "crates/postgres-store",
   "crates/metrics",
   "crates/integration-tests",
+  "crates/node-server",
 ]
 
 [workspace.package]

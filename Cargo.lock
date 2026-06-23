@@ -2827,6 +2827,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "node-server"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "chrono",
+ "common",
+ "proof-validator",
+ "prost",
+ "prost-types",
+ "sha2",
+ "tokio",
+ "tonic",
+ "tonic-build",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

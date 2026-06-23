@@ -1,0 +1,27 @@
+[package]
+name = "node-server"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "primora-node"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+common = { path = "../common" }
+proof-validator = { path = "../proof-validator" }
+tonic = { workspace = true }
+prost = { workspace = true }
+prost-types = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+chrono = { workspace = true }
+alloy-primitives = { workspace = true }
+sha2 = { workspace = true }
+
+[build-dependencies]
+tonic-build = "0.12"
