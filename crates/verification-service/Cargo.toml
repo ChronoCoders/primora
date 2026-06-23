@@ -6,3 +6,18 @@ license.workspace = true
 
 [dependencies]
 common = { path = "../common" }
+session-manager = { path = "../session-manager" }
+rate-limiter = { path = "../rate-limiter" }
+anomaly-engine = { path = "../anomaly-engine" }
+mint-ceiling = { path = "../mint-ceiling" }
+onchain-client = { path = "../onchain-client" }
+node-coordinator = { path = "../node-coordinator" }
+proof-validator = { path = "../proof-validator" }
+axum = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tower-http = { workspace = true }
+alloy-primitives = { workspace = true }
+chrono = { workspace = true }
