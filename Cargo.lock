@@ -3023,6 +3023,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "oracle-reader"
+version = "0.1.0"
+dependencies = [
+ "alloy",
+ "chrono",
+ "common",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "twap-calculator",
+]
+
+[[package]]
 name = "parity-scale-codec"
 version = "3.7.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"

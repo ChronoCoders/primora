@@ -1,0 +1,15 @@
+[package]
+name = "oracle-reader"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+common = { path = "../common" }
+twap-calculator = { path = "../twap-calculator" }
+alloy = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
