@@ -9,11 +9,8 @@ use alloy::providers::{Provider, ProviderBuilder, RootProvider};
 use alloy::rpc::types::BlockNumberOrTag;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::signers::SignerSync;
-use alloy::transports::http::{reqwest, Http};
 use alloy::transports::TransportError;
 use common::MintProposal;
-
-type HttpProvider = RootProvider<Http<reqwest::Client>>;
 
 /// Errors returned by the on-chain client.
 #[derive(Debug)]
@@ -71,17 +68,17 @@ impl From<alloy::signers::Error> for OnchainClientError {
 /// Read-only Ethereum client plus backend proposal signing. Never writes
 /// on-chain; it produces signed proposals for the admin multi-sig flow.
 pub struct OnchainClient {
-    provider: Arc<HttpProvider>,
+    provider: Arc<RootProvider>,
     chain_id: u64,
 }
 
 impl OnchainClient {
     /// Builds an HTTP provider for `rpc_url` bound to `chain_id`.
     pub async fn new(rpc_url: &str, chain_id: u64) -> Result<Self, OnchainClientError> {
-        let url: reqwest::Url = rpc_url
+        let url = rpc_url
             .parse()
             .map_err(|_| OnchainClientError::InvalidUrl(rpc_url.to_string()))?;
-        let provider = ProviderBuilder::new().on_http(url);
+        let provider = ProviderBuilder::new().connect_http(url);
         let root = provider.root().clone();
         Ok(Self {
             provider: Arc::new(root),
@@ -107,7 +104,7 @@ impl OnchainClient {
     ) -> Result<Option<[u8; 32]>, OnchainClientError> {
         let block = self
             .provider
-            .get_block_by_number(BlockNumberOrTag::Number(block_number), false)
+            .get_block_by_number(BlockNumberOrTag::Number(block_number))
             .await?;
         Ok(block.map(|b| b.header.hash.0))
     }
