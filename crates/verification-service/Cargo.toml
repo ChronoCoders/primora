@@ -24,6 +24,7 @@ postgres-store = { path = "../postgres-store" }
 metrics = { path = "../metrics" }
 twap-calculator = { path = "../twap-calculator" }
 oracle-reader = { path = "../oracle-reader" }
+payout-calculator = { path = "../payout-calculator" }
 alloy = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }

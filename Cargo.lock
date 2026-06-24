@@ -5351,6 +5351,7 @@ dependencies = [
  "node-coordinator",
  "onchain-client",
  "oracle-reader",
+ "payout-calculator",
  "postgres-store",
  "proof-validator",
  "rate-limiter",

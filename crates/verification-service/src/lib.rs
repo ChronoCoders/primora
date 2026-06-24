@@ -465,10 +465,26 @@ async fn end_session(
     match attestation {
         Ok(attestation_result) => {
             let duration_secs =
-                (twap.session_end - twap.session_start).num_seconds().max(0) as u128;
-            // TODO(phase2-formula): replace with full payout formula from Spec Section 4.6
-            // gross_prm = (hashrate * duration * base_coefficient) / difficulty
-            let gross_prm = twap.twap.saturating_mul(duration_secs);
+                (twap.session_end - twap.session_start).num_seconds().max(0) as u64;
+            let payout_config = payout_calculator::default_config();
+            // TODO(phase2-hashrate): use real tracked hashrate
+            let avg_hashrate: u64 = ctx.recent_proof_count.saturating_mul(400) as u64;
+            let payout_result = payout_calculator::calculate_payout(
+                avg_hashrate,
+                duration_secs,
+                twap.twap,
+                &ctx.commodity,
+                &payout_config,
+            );
+            let gross_prm = payout_result.gross_prm;
+            tracing::info!(
+                session_id = %session_id.0,
+                gross_prm = %payout_result.gross_prm,
+                redemption_usd_scaled = %payout_result.redemption_usd_scaled,
+                net_usdc_scaled = %payout_result.net_usdc_scaled,
+                house_edge_bps = %payout_result.house_edge_bps,
+                "payout calculated"
+            );
 
             let mut proposal = MintProposal {
                 session_id: session_id.clone(),
