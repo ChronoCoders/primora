@@ -45,10 +45,6 @@ contract OracleAggregator is OwnableUpgradeable, UUPSUpgradeable {
 
     /// @notice Emitted when a price is accepted and stored.
     event PriceSubmitted(uint8 indexed commodity, uint256 price, uint256 timestamp);
-    /// @notice Emitted when a submission is rejected for exceeding the divergence guard.
-    event PriceDivergenceRejected(
-        uint8 indexed commodity, uint256 submitted, uint256 lastStored, uint256 divergenceBps
-    );
     /// @notice Emitted when the authorized submitter is rotated.
     event SubmitterUpdated(address indexed oldSubmitter, address indexed newSubmitter);
 
@@ -95,7 +91,6 @@ contract OracleAggregator is OwnableUpgradeable, UUPSUpgradeable {
             uint256 diff = price > stored ? price - stored : stored - price;
             uint256 divergenceBps = diff * BPS_DENOMINATOR / stored;
             if (divergenceBps > DIVERGENCE_THRESHOLD_BPS) {
-                emit PriceDivergenceRejected(commodity, price, stored, divergenceBps);
                 revert PriceDiverged(price, stored, divergenceBps);
             }
         }
