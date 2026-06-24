@@ -143,6 +143,17 @@ async fn main() {
         }
     };
 
+    let oracle_reader = oracle_reader::OracleReader::new(
+        &config.rpc_url,
+        oracle_reader::default_chainlink_feeds(),
+        oracle_reader::default_pyth_feeds(),
+    )
+    .await
+    .unwrap_or_else(|e| {
+        tracing::error!(error = %e, "startup failed: oracle reader init");
+        std::process::exit(1);
+    });
+
     let signer = match PrivateKeySigner::from_str(&config.signing_key_hex) {
         Ok(signer) => signer,
         Err(e) => {
@@ -208,6 +219,7 @@ async fn main() {
         postgres_store: Arc::new(postgres_store),
         node_coordinator: Arc::new(node_coordinator),
         signing_key: Arc::new(signer),
+        oracle_reader: Arc::new(oracle_reader),
         twap_sessions: Arc::new(RwLock::new(HashMap::new())),
     };
 

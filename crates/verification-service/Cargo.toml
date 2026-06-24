@@ -23,6 +23,7 @@ proof-validator = { path = "../proof-validator" }
 postgres-store = { path = "../postgres-store" }
 metrics = { path = "../metrics" }
 twap-calculator = { path = "../twap-calculator" }
+oracle-reader = { path = "../oracle-reader" }
 alloy = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }

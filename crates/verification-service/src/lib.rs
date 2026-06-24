@@ -22,11 +22,9 @@ use proof_validator::PreFilterValidator;
 use rate_limiter::RateLimitResult;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
-use twap_calculator::{OracleSource, PriceSample, TwapCalculator};
+use twap_calculator::TwapCalculator;
 use tower_http::trace::TraceLayer;
 
-/// Placeholder oracle price used until real oracle reads are wired in.
-const PLACEHOLDER_XAU_PRICE: u128 = 320_400_000_000;
 /// Number of blocks behind the head used to derive the session seed.
 const SEED_BLOCK_OFFSET: u64 = 3;
 
@@ -49,6 +47,8 @@ pub struct AppState {
     pub node_coordinator: Arc<node_coordinator::NodeCoordinator<node_coordinator::GrpcNodeClient>>,
     /// Backend signing key for mint proposals.
     pub signing_key: Arc<alloy::signers::local::PrivateKeySigner>,
+    /// Oracle reader supplying Chainlink and Pyth prices for TWAP sampling.
+    pub oracle_reader: Arc<oracle_reader::OracleReader>,
     /// TWAP calculators keyed by session id, guarded for concurrent access.
     pub twap_sessions: Arc<RwLock<HashMap<String, TwapCalculator>>>,
 }
@@ -346,11 +346,13 @@ async fn submit_proof(
     {
         let mut map = state.twap_sessions.write().await;
         if let Some(calculator) = map.get_mut(&session_id.0) {
-            calculator.add_sample(PriceSample {
-                price: PLACEHOLDER_XAU_PRICE,
-                sampled_at: Utc::now(),
-                oracle: OracleSource::Chainlink,
-            });
+            if let Err(e) = state
+                .oracle_reader
+                .sample_into_twap(ctx.commodity, calculator)
+                .await
+            {
+                tracing::warn!(error = %e, "oracle read failed, skipping TWAP sample");
+            }
         }
     }
 

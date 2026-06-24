@@ -5342,6 +5342,7 @@ dependencies = [
  "mint-ceiling",
  "node-coordinator",
  "onchain-client",
+ "oracle-reader",
  "postgres-store",
  "proof-validator",
  "rate-limiter",
