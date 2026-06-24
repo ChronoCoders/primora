@@ -16,6 +16,7 @@ members = [
   "crates/integration-tests",
   "crates/node-server",
   "crates/oracle-reader",
+  "crates/payout-calculator",
 ]
 
 [workspace.package]
