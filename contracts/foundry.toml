@@ -12,3 +12,11 @@ remappings = [
     "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
     "@openzeppelin/contracts-upgradeable/=lib/openzeppelin-contracts-upgradeable/contracts/",
 ]
+
+# block-timestamp lint excluded project-wide. All time-based logic in these
+# contracts (timelocks, veto windows, price staleness) operates on windows of
+# hours to days. Validator timestamp drift is bounded to a few seconds and
+# cannot game these windows. This is a deliberate architectural decision,
+# documented here rather than suppressed inline per call site.
+[lint]
+exclude_lints = ["block-timestamp"]

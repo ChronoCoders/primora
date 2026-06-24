@@ -100,7 +100,6 @@ contract HouseEdge is OwnableUpgradeable, UUPSUpgradeable {
         if (proposal.executed) revert ProposalAlreadyExecuted();
         if (proposal.cancelled) revert ProposalAlreadyCancelled();
         uint256 executionTime = proposal.proposedAt + TIMELOCK_DELAY;
-        // forge-lint: disable-next-line(block-timestamp)
         if (block.timestamp < executionTime) revert TimelockNotExpired(executionTime, block.timestamp);
         uint256 oldEdge = currentEdgeBps;
         currentEdgeBps = proposal.newEdgeBps;

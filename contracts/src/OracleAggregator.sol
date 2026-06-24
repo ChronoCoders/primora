@@ -110,7 +110,6 @@ contract OracleAggregator is OwnableUpgradeable, UUPSUpgradeable {
     function getPrice(uint8 commodity) external view returns (uint256 price, uint256 updatedAt) {
         PriceData storage data = prices[commodity];
         if (!data.initialized) revert PriceNotInitialized();
-        // forge-lint: disable-next-line(block-timestamp)
         if (block.timestamp > data.updatedAt + MAX_PRICE_AGE) {
             revert PriceStale(data.updatedAt, block.timestamp);
         }

@@ -199,7 +199,6 @@ contract NodeRegistry is OwnableUpgradeable, UUPSUpgradeable {
         if (proposal.executed) revert AlreadyExecuted();
         if (proposal.vetoed) revert AlreadyVetoed();
         if (proposal.confirmations < 2) revert InsufficientConfirmations();
-        // forge-lint: disable-next-line(block-timestamp)
         if (block.timestamp < proposal.proposedAt + VETO_WINDOW) revert VetoWindowActive();
         NodeInfo storage node = nodes[proposal.nodeId];
         uint8 currentViolations = node.violationCount;
@@ -221,7 +220,6 @@ contract NodeRegistry is OwnableUpgradeable, UUPSUpgradeable {
     function vetoSlash(bytes32 proposalId) external onlyOwner {
         SlashProposal storage proposal = slashProposals[proposalId];
         if (proposal.executed) revert AlreadyExecuted();
-        // forge-lint: disable-next-line(block-timestamp)
         if (block.timestamp > proposal.proposedAt + VETO_WINDOW) revert VetoWindowExpired();
         proposal.vetoed = true;
         emit SlashVetoed(proposalId);
