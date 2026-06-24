@@ -20,6 +20,9 @@ contract NodeRegistryTest is Test {
     bytes32 internal constant NODE_ID = keccak256("node-1");
     bytes32 internal constant PROPOSER = keccak256("observer-1");
     bytes32 internal constant CONFIRMER = keccak256("observer-2");
+    bytes32 internal constant P1 = keccak256("proposal-1");
+    bytes32 internal constant P2 = keccak256("proposal-2");
+    bytes32 internal constant P3 = keccak256("proposal-3");
 
     uint256 internal constant STAKE = 10_000e18;
 
@@ -113,26 +116,26 @@ contract NodeRegistryTest is Test {
     function test_propose_slash() public {
         _register();
         vm.prank(owner);
-        registry.proposeSlash(bytes32("p1"), NODE_ID, PROPOSER, NodeRegistry.SlashReason.InvalidAttestation);
-        (,, uint8 confirmations,,,) = registry.slashProposals(bytes32("p1"));
+        registry.proposeSlash(P1, NODE_ID, PROPOSER, NodeRegistry.SlashReason.InvalidAttestation);
+        (,, uint8 confirmations,,,) = registry.slashProposals(P1);
         assertEq(confirmations, 1);
     }
 
     /// @notice A second observer confirmation reaches the 2-of-3 threshold.
     function test_confirm_slash() public {
         _register();
-        _proposeAndConfirm(bytes32("p1"), NodeRegistry.SlashReason.InvalidAttestation);
-        (,, uint8 confirmations,,,) = registry.slashProposals(bytes32("p1"));
+        _proposeAndConfirm(P1, NodeRegistry.SlashReason.InvalidAttestation);
+        (,, uint8 confirmations,,,) = registry.slashProposals(P1);
         assertEq(confirmations, 2);
     }
 
     /// @notice A first InvalidAttestation slash burns 10% after the veto window.
     function test_execute_slash_first_violation() public {
         _register();
-        _proposeAndConfirm(bytes32("p1"), NodeRegistry.SlashReason.InvalidAttestation);
+        _proposeAndConfirm(P1, NodeRegistry.SlashReason.InvalidAttestation);
         vm.warp(block.timestamp + registry.VETO_WINDOW() + 1);
         vm.prank(owner);
-        registry.executeSlash(bytes32("p1"));
+        registry.executeSlash(P1);
         (, uint256 staked, uint8 violations,,) = registry.nodes(NODE_ID);
         assertEq(staked, 9_000e18);
         assertEq(violations, 1);
@@ -143,50 +146,50 @@ contract NodeRegistryTest is Test {
     /// @notice Executing before the veto window closes reverts.
     function test_execute_slash_revert_veto_window() public {
         _register();
-        _proposeAndConfirm(bytes32("p1"), NodeRegistry.SlashReason.InvalidAttestation);
+        _proposeAndConfirm(P1, NodeRegistry.SlashReason.InvalidAttestation);
         vm.expectRevert(NodeRegistry.VetoWindowActive.selector);
         vm.prank(owner);
-        registry.executeSlash(bytes32("p1"));
+        registry.executeSlash(P1);
     }
 
     /// @notice An operator veto within the window halts the proposal.
     function test_veto_slash() public {
         _register();
-        _proposeAndConfirm(bytes32("p1"), NodeRegistry.SlashReason.InvalidAttestation);
+        _proposeAndConfirm(P1, NodeRegistry.SlashReason.InvalidAttestation);
         vm.prank(owner);
-        registry.vetoSlash(bytes32("p1"));
-        (,,,,, bool vetoed) = registry.slashProposals(bytes32("p1"));
+        registry.vetoSlash(P1);
+        (,,,,, bool vetoed) = registry.slashProposals(P1);
         assertTrue(vetoed);
     }
 
     /// @notice Vetoing after the window has closed reverts.
     function test_veto_slash_revert_expired() public {
         _register();
-        _proposeAndConfirm(bytes32("p1"), NodeRegistry.SlashReason.InvalidAttestation);
+        _proposeAndConfirm(P1, NodeRegistry.SlashReason.InvalidAttestation);
         vm.warp(block.timestamp + registry.VETO_WINDOW() + 1);
         vm.expectRevert(NodeRegistry.VetoWindowExpired.selector);
         vm.prank(owner);
-        registry.vetoSlash(bytes32("p1"));
+        registry.vetoSlash(P1);
     }
 
     /// @notice Three InvalidAttestation slashes escalate to full burn and deregister.
     function test_third_violation_deregisters() public {
         _register();
 
-        _proposeAndConfirm(bytes32("p1"), NodeRegistry.SlashReason.InvalidAttestation);
+        _proposeAndConfirm(P1, NodeRegistry.SlashReason.InvalidAttestation);
         vm.warp(block.timestamp + registry.VETO_WINDOW() + 1);
         vm.prank(owner);
-        registry.executeSlash(bytes32("p1"));
+        registry.executeSlash(P1);
 
-        _proposeAndConfirm(bytes32("p2"), NodeRegistry.SlashReason.InvalidAttestation);
+        _proposeAndConfirm(P2, NodeRegistry.SlashReason.InvalidAttestation);
         vm.warp(block.timestamp + registry.VETO_WINDOW() + 1);
         vm.prank(owner);
-        registry.executeSlash(bytes32("p2"));
+        registry.executeSlash(P2);
 
-        _proposeAndConfirm(bytes32("p3"), NodeRegistry.SlashReason.InvalidAttestation);
+        _proposeAndConfirm(P3, NodeRegistry.SlashReason.InvalidAttestation);
         vm.warp(block.timestamp + registry.VETO_WINDOW() + 1);
         vm.prank(owner);
-        registry.executeSlash(bytes32("p3"));
+        registry.executeSlash(P3);
 
         (, uint256 staked, uint8 violations, bool active,) = registry.nodes(NODE_ID);
         assertFalse(active);
