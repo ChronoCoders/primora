@@ -13,6 +13,7 @@ contract PrimTokenTest is Test {
 
     address internal owner = address(0xA11CE);
     address internal minter = address(0xB0B);
+    address internal burner = address(0xBEE);
     address internal user = address(0xCA47);
 
     /// @notice Deploys the implementation behind an ERC1967 proxy and initializes it.
@@ -89,5 +90,42 @@ contract PrimTokenTest is Test {
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, user));
         vm.prank(user);
         token.upgradeToAndCall(address(newImpl), "");
+    }
+
+    /// @notice Owner can set the burner and the change is recorded and emitted.
+    function test_set_burner() public {
+        vm.expectEmit(true, true, false, false);
+        emit PrimToken.BurnerUpdated(address(0), burner);
+        vm.prank(owner);
+        token.setBurner(burner);
+        assertEq(token.burner(), burner);
+    }
+
+    /// @notice The configured burner can burn and supply/balances update.
+    function test_burn_by_burner() public {
+        vm.prank(owner);
+        token.setMinter(minter);
+        vm.prank(minter);
+        token.mint(user, 1000e18);
+
+        vm.prank(owner);
+        token.setBurner(burner);
+        vm.prank(burner);
+        token.burn(user, 400e18);
+
+        assertEq(token.balanceOf(user), 600e18);
+        assertEq(token.totalSupply(), 600e18);
+    }
+
+    /// @notice A non-burner calling burn reverts with {NotBurner}.
+    function test_burn_revert_not_burner() public {
+        vm.prank(owner);
+        token.setMinter(minter);
+        vm.prank(minter);
+        token.mint(user, 1000e18);
+
+        vm.expectRevert(PrimToken.NotBurner.selector);
+        vm.prank(user);
+        token.burn(user, 100e18);
     }
 }

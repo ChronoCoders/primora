@@ -15,10 +15,18 @@ contract PrimToken is ERC20Upgradeable, ERC20PermitUpgradeable, OwnableUpgradeab
     /// @notice The only address permitted to mint PRM.
     address public minter;
 
+    /// @notice The only address permitted to burn PRM (the NodeRegistry).
+    address public burner;
+
     /// @notice Emitted when the minter address is changed.
     /// @param oldMinter The previous minter address.
     /// @param newMinter The new minter address.
     event MinterUpdated(address indexed oldMinter, address indexed newMinter);
+
+    /// @notice Emitted when the burner address is changed.
+    /// @param oldBurner The previous burner address.
+    /// @param newBurner The new burner address.
+    event BurnerUpdated(address indexed oldBurner, address indexed newBurner);
 
     /// @notice Emitted when new PRM is minted.
     /// @param to The recipient of the minted tokens.
@@ -27,6 +35,9 @@ contract PrimToken is ERC20Upgradeable, ERC20PermitUpgradeable, OwnableUpgradeab
 
     /// @notice Thrown when a non-minter calls a minter-only function.
     error NotMinter();
+
+    /// @notice Thrown when a non-burner calls a burner-only function.
+    error NotBurner();
 
     /// @notice Thrown when a zero address is supplied where it is not allowed.
     error ZeroAddress();
@@ -49,6 +60,14 @@ contract PrimToken is ERC20Upgradeable, ERC20PermitUpgradeable, OwnableUpgradeab
         minter = newMinter;
     }
 
+    /// @notice Sets the authorized burner. Timelock enforcement is external.
+    /// @param newBurner The address to grant burning authority.
+    function setBurner(address newBurner) external onlyOwner {
+        if (newBurner == address(0)) revert ZeroAddress();
+        emit BurnerUpdated(burner, newBurner);
+        burner = newBurner;
+    }
+
     /// @notice Mints PRM to a recipient. Callable only by the configured minter.
     /// @param to The recipient of the minted tokens.
     /// @param amount The amount to mint, in wei (18 decimals).
@@ -57,6 +76,15 @@ contract PrimToken is ERC20Upgradeable, ERC20PermitUpgradeable, OwnableUpgradeab
         if (to == address(0)) revert ZeroAddress();
         emit TokensMinted(to, amount);
         _mint(to, amount);
+    }
+
+    /// @notice Burns PRM from an account. Callable only by the configured burner
+    ///         (the NodeRegistry, which burns slashed stake it custodies).
+    /// @param from The account whose tokens are burned.
+    /// @param amount The amount to burn, in wei (18 decimals).
+    function burn(address from, uint256 amount) external {
+        if (msg.sender != burner) revert NotBurner();
+        _burn(from, amount);
     }
 
     /// @notice Authorizes a UUPS implementation upgrade. Restricted to the owner.
