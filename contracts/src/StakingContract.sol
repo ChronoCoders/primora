@@ -84,11 +84,14 @@ contract StakingContract is OwnableUpgradeable, UUPSUpgradeable {
     error StillLocked(uint256 unlockAt, uint256 currentTime);
     /// @notice Thrown when a zero amount is supplied.
     error ZeroAmount();
+    /// @notice Thrown when a zero address is supplied where disallowed.
+    error ZeroAddress();
 
     /// @notice Initializes ownership and the staking token.
     /// @param initialOwner The address granted ownership of the contract.
     /// @param _primToken The PRM token users stake.
     function initialize(address initialOwner, address _primToken) external initializer {
+        if (_primToken == address(0)) revert ZeroAddress();
         __Ownable_init(initialOwner);
         primToken = IERC20(_primToken);
     }

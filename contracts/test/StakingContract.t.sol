@@ -75,6 +75,13 @@ contract StakingContractTest is Test {
         assertEq(staking.owner(), owner);
     }
 
+    /// @notice Initializing with a zero token address reverts.
+    function test_initialize_revert_zero_token() public {
+        StakingContract impl = new StakingContract();
+        vm.expectRevert(StakingContract.ZeroAddress.selector);
+        new ERC1967Proxy(address(impl), abi.encodeCall(StakingContract.initialize, (owner, address(0))));
+    }
+
     /// @notice A valid stake is recorded with the correct unlock time.
     function test_stake_success() public {
         _stake(alice, 10_000e18, StakingContract.LockPeriod.Days30);
