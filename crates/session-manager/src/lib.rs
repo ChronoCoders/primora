@@ -221,6 +221,18 @@ impl SessionStore {
         Ok(count as u32)
     }
 
+    /// Returns the current proof counter for a session, or 0 when the counter
+    /// key is absent.
+    pub async fn get_proof_count(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<u32, SessionManagerError> {
+        let mut conn = self.conn.clone();
+        let key = format!("proof_count:{}", session_id.0);
+        let count: Option<i64> = redis::cmd("GET").arg(&key).query_async(&mut conn).await?;
+        Ok(count.unwrap_or(0) as u32)
+    }
+
     /// Counts active sessions for a wallet by scanning matching keys.
     pub async fn get_active_session_count(
         &self,
@@ -328,5 +340,13 @@ mod tests {
         assert_eq!(store.increment_proof_count(&id).await.unwrap(), 1);
         assert_eq!(store.increment_proof_count(&id).await.unwrap(), 2);
         store.delete_session(&Address::ZERO, &id).await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_get_proof_count_missing() {
+        let store = SessionStore::new(TEST_URL).await.unwrap();
+        let id = SessionId("nonexistent-session-xyz".to_string());
+        assert_eq!(store.get_proof_count(&id).await.unwrap(), 0);
     }
 }

@@ -306,7 +306,14 @@ async fn submit_proof(
         signature: None,
     };
     let result = PreFilterValidator.validate(&proof, ValidationMode::PreFilter, &ctx);
-    state.session_manager.increment_proof_count(&session_id).await?;
+    match state.session_manager.increment_proof_count(&session_id).await {
+        Ok(count) => {
+            tracing::debug!(session_id = %session_id.0, proof_count = count, "proof counted");
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to increment proof count");
+        }
+    }
     state.session_manager.store_proof(&session_id, proof).await?;
 
     let client_type_label = format!("{:?}", ctx.client_type);
@@ -467,8 +474,16 @@ async fn end_session(
             let duration_secs =
                 (twap.session_end - twap.session_start).num_seconds().max(0) as u64;
             let payout_config = payout_calculator::default_config();
-            // TODO(phase2-hashrate): use real tracked hashrate
-            let avg_hashrate: u64 = ctx.recent_proof_count.saturating_mul(400) as u64;
+            let proof_count = state
+                .session_manager
+                .get_proof_count(&session_id)
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!(error = %e, "failed to read proof count, using 0");
+                    0
+                });
+            // TODO(phase2-hashrate): track real per-proof hashrate in Redis
+            let avg_hashrate: u64 = if proof_count > 0 { 2_500 } else { 0 };
             let payout_result = payout_calculator::calculate_payout(
                 avg_hashrate,
                 duration_secs,
