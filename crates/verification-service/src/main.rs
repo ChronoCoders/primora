@@ -146,7 +146,7 @@ async fn main() {
 
     let oracle_reader = oracle_reader::OracleReader::new(
         &config.rpc_url,
-        oracle_reader::default_chainlink_feeds(),
+        oracle_reader::feeds_from_env_or_default(),
         oracle_reader::default_pyth_feeds(),
     )
     .await

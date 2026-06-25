@@ -42,7 +42,11 @@ cd contracts
 forge script script/Deploy.s.sol:DeployScript \
   --rpc-url $RPC --private-key $DEPLOYER_KEY --broadcast > /tmp/deploy_smoke.log 2>&1
 ORACLE_ADDR=$(python3 -c "import json; print(json.load(open('deployments/local.json'))['OracleAggregator'])")
+XAU_FEED=$(python3 -c "import json; print(json.load(open('deployments/local.json'))['MockXAUFeed'])")
+XAG_FEED=$(python3 -c "import json; print(json.load(open('deployments/local.json'))['MockXAGFeed'])")
 echo "OracleAggregator: $ORACLE_ADDR"
+echo "MockXAUFeed: $XAU_FEED"
+echo "MockXAGFeed: $XAG_FEED"
 cd ..
 
 echo "=== 4. Build backend ==="
@@ -57,6 +61,8 @@ RPC_URL="$RPC" \
 SIGNING_KEY_HEX="0000000000000000000000000000000000000000000000000000000000000001" \
 ORACLE_SUBMITTER_KEY_HEX="ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80" \
 ORACLE_AGGREGATOR_ADDRESS="$ORACLE_ADDR" \
+CHAINLINK_XAU_ADDRESS="$XAU_FEED" \
+CHAINLINK_XAG_ADDRESS="$XAG_FEED" \
 LOG_LEVEL="info" \
 ./target/debug/primora-verification > /tmp/backend_smoke.log 2>&1 &
 BACKEND_PID=$!

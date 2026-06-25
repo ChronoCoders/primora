@@ -12,6 +12,7 @@ import {OracleAggregator} from "../src/OracleAggregator.sol";
 import {MiningContract} from "../src/MiningContract.sol";
 import {Treasury} from "../src/Treasury.sol";
 import {StakingContract} from "../src/StakingContract.sol";
+import {MockChainlinkFeed} from "../src/mocks/MockChainlinkFeed.sol";
 
 /// @notice Configurable-decimal mock stablecoin for local testnet reserves.
 contract MockUSD is ERC20 {
@@ -119,6 +120,9 @@ contract DeployScript is Script {
         mining.addSigner(vm.addr(4));
         mining.addSigner(deployer);
 
+        MockChainlinkFeed xauFeed = new MockChainlinkFeed(320400000000, 8);
+        MockChainlinkFeed xagFeed = new MockChainlinkFeed(3180000000, 8);
+
         vm.stopBroadcast();
 
         console2.log("PrimToken:", address(primToken));
@@ -130,6 +134,8 @@ contract DeployScript is Script {
         console2.log("MiningContract:", address(mining));
         console2.log("MockUSDC:", address(usdc));
         console2.log("MockUSDT:", address(usdt));
+        console2.log("MockXAUFeed:", address(xauFeed));
+        console2.log("MockXAGFeed:", address(xagFeed));
 
         string memory key = "primora-local";
         vm.serializeAddress(key, "PrimToken", address(primToken));
@@ -140,7 +146,9 @@ contract DeployScript is Script {
         vm.serializeAddress(key, "StakingContract", address(staking));
         vm.serializeAddress(key, "MiningContract", address(mining));
         vm.serializeAddress(key, "MockUSDC", address(usdc));
-        string memory out = vm.serializeAddress(key, "MockUSDT", address(usdt));
+        vm.serializeAddress(key, "MockUSDT", address(usdt));
+        vm.serializeAddress(key, "MockXAUFeed", address(xauFeed));
+        string memory out = vm.serializeAddress(key, "MockXAGFeed", address(xagFeed));
         vm.writeJson(out, "./deployments/local.json");
     }
 }

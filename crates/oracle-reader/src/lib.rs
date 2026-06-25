@@ -4,6 +4,7 @@
 //! (XPT, WTI) HTTP feeds, normalized to 8-decimal scaled integers and sampled
 //! into the session TWAP calculator.
 
+use std::str::FromStr;
 use std::sync::Arc;
 
 use alloy::primitives::{address, Address, I256, U256};
@@ -81,6 +82,31 @@ pub fn default_chainlink_feeds() -> Vec<ChainlinkFeed> {
             decimals: 8,
         },
     ]
+}
+
+/// Returns Chainlink feeds, overriding aggregator addresses from the
+/// `CHAINLINK_XAU_ADDRESS` and `CHAINLINK_XAG_ADDRESS` environment variables
+/// when present. This lets a local test point the reader at mock feeds without
+/// affecting production behavior, which uses the mainnet defaults. An
+/// unparseable override is logged and ignored in favor of the default.
+pub fn feeds_from_env_or_default() -> Vec<ChainlinkFeed> {
+    let mut feeds = default_chainlink_feeds();
+    for feed in feeds.iter_mut() {
+        let var = match feed.commodity {
+            Commodity::Gold => "CHAINLINK_XAU_ADDRESS",
+            Commodity::Silver => "CHAINLINK_XAG_ADDRESS",
+            _ => continue,
+        };
+        if let Ok(raw) = std::env::var(var) {
+            match Address::from_str(&raw) {
+                Ok(addr) => feed.address = addr,
+                Err(_) => {
+                    tracing::warn!(var, value = %raw, "invalid chainlink address override, using default");
+                }
+            }
+        }
+    }
+    feeds
 }
 
 /// Returns the default Pyth feeds for commodities without a mainnet Chainlink
@@ -338,7 +364,6 @@ impl OracleReader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::str::FromStr;
 
     #[test]
     fn test_default_chainlink_feeds() {
