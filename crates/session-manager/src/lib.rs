@@ -23,7 +23,8 @@ pub struct SessionSummary {
     pub proof_count: u32,
     /// UTC timestamp when the session was created.
     pub started_at: DateTime<Utc>,
-    /// Timestamp of the last proof submission, `None` until the first proof.
+    /// Timestamp of the last accepted proof submission, sourced from the
+    /// `last_activity:{session_id}` key. `None` until the first proof.
     pub last_submission_at: Option<DateTime<Utc>>,
     /// Session lifecycle status; a session present in Redis is active.
     pub status: String,
@@ -278,6 +279,48 @@ impl SessionStore {
         Ok(sum / count)
     }
 
+    /// Records the current UTC time as the session's last activity, stored as
+    /// unix seconds under `last_activity:{session_id}` with a one-hour TTL to
+    /// match the session lifetime keys.
+    pub async fn touch_last_activity(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionManagerError> {
+        let mut conn = self.conn.clone();
+        let key = format!("last_activity:{}", session_id.0);
+        let now = Utc::now().timestamp();
+        let _: () = redis::cmd("SET")
+            .arg(&key)
+            .arg(now)
+            .arg("EX")
+            .arg(TTL_SECS)
+            .query_async(&mut conn)
+            .await?;
+        Ok(())
+    }
+
+    /// Returns the session's last activity time, or `None` when no activity has
+    /// been recorded. A stored value that fails to parse is logged and treated
+    /// as absent.
+    pub async fn get_last_activity(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<DateTime<Utc>>, SessionManagerError> {
+        let mut conn = self.conn.clone();
+        let key = format!("last_activity:{}", session_id.0);
+        let stored: Option<i64> = redis::cmd("GET").arg(&key).query_async(&mut conn).await?;
+        let Some(secs) = stored else {
+            return Ok(None);
+        };
+        match DateTime::<Utc>::from_timestamp(secs, 0) {
+            Some(ts) => Ok(Some(ts)),
+            None => {
+                tracing::warn!(session = %session_id.0, secs, "invalid last_activity timestamp");
+                Ok(None)
+            }
+        }
+    }
+
     /// Increments and returns the proof counter for a session.
     pub async fn increment_proof_count(
         &self,
@@ -363,12 +406,14 @@ impl SessionStore {
                 let count_key = format!("proof_count:{session_id}");
                 let count: Option<i64> =
                     redis::cmd("GET").arg(&count_key).query_async(&mut conn).await?;
+                let session = SessionId(session_id.clone());
+                let last_submission_at = self.get_last_activity(&session).await?;
                 summaries.push(SessionSummary {
                     session_id,
                     commodity: format!("{:?}", ctx.commodity),
                     proof_count: count.unwrap_or(0).max(0) as u32,
                     started_at: ctx.started_at,
-                    last_submission_at: ctx.last_submission_at,
+                    last_submission_at,
                     status: "active".to_string(),
                 });
             }
@@ -393,6 +438,7 @@ impl SessionStore {
         let count_key = format!("proof_count:{}", session_id.0);
         let proofs_key = format!("proofs:{}", session_id.0);
         let hashrate_key = format!("hashrate_sum:{}", session_id.0);
+        let activity_key = format!("last_activity:{}", session_id.0);
         let _: () = redis::cmd("DEL")
             .arg(&session_key)
             .arg(&lookup_key)
@@ -400,6 +446,7 @@ impl SessionStore {
             .arg(&count_key)
             .arg(&proofs_key)
             .arg(&hashrate_key)
+            .arg(&activity_key)
             .query_async(&mut conn)
             .await?;
         Ok(())
@@ -496,6 +543,19 @@ mod tests {
         assert_eq!(summary.status, "active");
         assert_eq!(summary.started_at, ctx.started_at);
         assert!(summary.last_submission_at.is_none());
+
+        let before = Utc::now().timestamp();
+        store.touch_last_activity(&id).await.unwrap();
+        let sessions = store.list_sessions_for_wallet(&wallet).await.unwrap();
+        let summary = sessions
+            .iter()
+            .find(|s| s.session_id == id.0)
+            .expect("created session present in listing");
+        let activity = summary
+            .last_submission_at
+            .expect("last activity present after touch");
+        assert!((activity.timestamp() - before).abs() <= 5);
+
         store.delete_session(&Address::ZERO, &id).await.unwrap();
     }
 

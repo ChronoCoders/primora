@@ -370,6 +370,9 @@ async fn submit_proof(
                 tracing::warn!(error = %e, "failed to record hashrate sample");
             }
         }
+        if let Err(e) = state.session_manager.touch_last_activity(&session_id).await {
+            tracing::warn!(error = %e, "failed to update last activity");
+        }
     }
     state.session_manager.store_proof(&session_id, proof).await?;
 
