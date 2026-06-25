@@ -27,13 +27,10 @@ const DEFAULT_NODE_ID: &str = "node-unknown";
 
 /// RandomX seed (cache key) for the verifier. For Phase 2 this is a fixed
 /// value shared by all nodes. In production the seed rotates per epoch so that
-/// proofs are bound to an epoch and cannot be precomputed far ahead.
+/// proofs are bound to an epoch and cannot be precomputed far ahead. Clients
+/// must hash their proof input under this same key for verification to succeed.
 // TODO(phase3-epoch-seed): derive the seed from the active mining epoch.
-const RANDOMX_SEED: &[u8] = b"primora-phase2-randomx-seed";
-
-/// Difficulty target applied to every verified proof. Fixed for Phase 2; in
-/// production this is set per epoch alongside the seed.
-const PHASE2_DIFFICULTY: u64 = 1;
+pub const RANDOMX_SEED: &[u8] = b"primora-phase2-randomx-seed";
 
 /// A RandomX verification request sent to the dedicated verifier thread.
 struct VerifyJob {
@@ -120,23 +117,6 @@ fn proof_hash_bytes(hash: &proto::ProofHash) -> [u8; 32] {
     out
 }
 
-/// Reconstructs the RandomX proof input from the attestation metadata.
-///
-/// The preimage is the canonical concatenation of the session id, wallet, and
-/// commodity. Note that the raw proof nonce is not carried over the
-/// attestation RPC, so this reconstruction binds a proof to its session
-/// identity but not yet to a specific nonce; transmitting the nonce in the
-/// proof metadata is required to fully close the verification loop.
-// TODO(phase3-proof-nonce): carry the proof nonce so the input matches the
-// exact preimage the client hashed.
-fn reconstruct_proof_input(session_id: &str, wallet: &str, commodity: &str) -> Vec<u8> {
-    let mut input = Vec::with_capacity(session_id.len() + wallet.len() + commodity.len());
-    input.extend_from_slice(session_id.as_bytes());
-    input.extend_from_slice(wallet.as_bytes());
-    input.extend_from_slice(commodity.as_bytes());
-    input
-}
-
 #[tonic::async_trait]
 impl NodeService for NodeServiceImpl {
     async fn submit_proof_metadata(
@@ -177,105 +157,91 @@ impl NodeService for NodeServiceImpl {
         self.authenticate(&request)?;
         let attestation_request = request.into_inner();
 
-        let proof_hashes: Vec<[u8; 32]> = attestation_request
-            .proof_hash
-            .iter()
-            .map(proof_hash_bytes)
-            .collect();
-
-        // A proof set with no hashes attests nothing.
-        let mut valid = !proof_hashes.is_empty();
-
-        // Structural pre-filter pass. The validator is `!Send`, so it is fully
-        // scoped here and dropped before any `.await` below.
-        let prefilter_ok: Vec<bool> = {
-            let validator = proof_validator::validator(ValidationMode::PreFilter);
-            proof_hashes
-                .iter()
-                .enumerate()
-                .map(|(index, hash)| {
-                    let proof = PartialProof {
-                        session_id: SessionId(attestation_request.session_id.clone()),
-                        wallet: Address::ZERO,
-                        sequence: index as u32,
-                        hashrate: 0,
-                        proof_hash: *hash,
-                        submitted_at: Utc::now(),
-                        signature: None,
-                    };
-                    let ctx = SessionContext {
-                        wallet: Address::ZERO,
-                        ip: None,
-                        client_type: ClientType::Desktop,
-                        active_sessions_count: 1,
-                        last_submission_at: None,
-                        recent_proof_count: index as u32,
-                        assigned_node_id: None,
-                        commodity: Commodity::Gold,
-                    };
-                    match validator.validate(&proof, ValidationMode::PreFilter, &ctx) {
-                        ValidationResult::Invalid(reason) => {
-                            tracing::warn!(?reason, index, "proof failed pre-filter");
-                            false
-                        }
-                        ValidationResult::Suspicious(SuspicionLevel::High) => {
-                            tracing::warn!(index, "proof flagged high suspicion");
-                            true
-                        }
-                        ValidationResult::Valid | ValidationResult::Suspicious(_) => true,
-                    }
-                })
-                .collect()
-        };
-
-        // RandomX verification pass. Each proof input is reconstructed and sent
-        // to the dedicated verifier thread; a failed structural check skips it.
-        for (index, hash) in proof_hashes.iter().enumerate() {
-            if !prefilter_ok[index] {
-                valid = false;
-                continue;
-            }
-            let input = reconstruct_proof_input(
-                &attestation_request.session_id,
-                &attestation_request.wallet,
-                &attestation_request.commodity,
-            );
-            let (reply_tx, reply_rx) = oneshot::channel();
-            let job = VerifyJob {
-                input,
-                expected: *hash,
-                difficulty: PHASE2_DIFFICULTY,
-                reply: reply_tx,
-            };
-            if self.verify_tx.send(job).is_err() {
-                return Err(Status::internal("randomx verifier unavailable"));
-            }
-            match reply_rx.await {
-                Ok(Ok(true)) => {}
-                Ok(Ok(false)) => {
-                    tracing::warn!(index, "proof failed randomx verification");
-                    valid = false;
-                }
-                Ok(Err(e)) => {
-                    tracing::error!(error = %e, index, "randomx verification errored");
-                    valid = false;
-                }
-                Err(_) => return Err(Status::internal("randomx verifier dropped reply")),
-            }
-        }
-
-        if !valid {
-            return Ok(Response::new(proto::AttestationResponse {
-                session_id: attestation_request.session_id,
+        let invalid = |session_id: String| {
+            Ok(Response::new(proto::AttestationResponse {
+                session_id,
                 valid: false,
                 signature: None,
-            }));
+            }))
+        };
+
+        let proof_hash = match attestation_request.proof_hash.as_ref() {
+            Some(hash) => proof_hash_bytes(hash),
+            None => {
+                tracing::warn!("attestation request missing proof hash");
+                return invalid(attestation_request.session_id);
+            }
+        };
+
+        // Structural pre-filter (sync; the validator is `!Send`, so it is fully
+        // scoped and dropped before the `.await` below).
+        let prefilter_ok = {
+            let validator = proof_validator::validator(ValidationMode::PreFilter);
+            let proof = PartialProof {
+                session_id: SessionId(attestation_request.session_id.clone()),
+                wallet: Address::ZERO,
+                sequence: 0,
+                hashrate: 0,
+                proof_hash,
+                proof_input: attestation_request.proof_input.clone(),
+                difficulty: attestation_request.difficulty,
+                submitted_at: Utc::now(),
+                signature: None,
+            };
+            let ctx = SessionContext {
+                wallet: Address::ZERO,
+                ip: None,
+                client_type: ClientType::Desktop,
+                active_sessions_count: 1,
+                last_submission_at: None,
+                recent_proof_count: 0,
+                assigned_node_id: None,
+                commodity: Commodity::Gold,
+            };
+            match validator.validate(&proof, ValidationMode::PreFilter, &ctx) {
+                ValidationResult::Invalid(reason) => {
+                    tracing::warn!(?reason, "proof failed pre-filter");
+                    false
+                }
+                ValidationResult::Suspicious(SuspicionLevel::High) => {
+                    tracing::warn!("proof flagged high suspicion");
+                    true
+                }
+                ValidationResult::Valid | ValidationResult::Suspicious(_) => true,
+            }
+        };
+        if !prefilter_ok {
+            return invalid(attestation_request.session_id);
+        }
+
+        // RandomX verification: re-hash the exact proof input on the dedicated
+        // verifier thread and confirm it matches the claimed hash and meets the
+        // claimed difficulty.
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let job = VerifyJob {
+            input: attestation_request.proof_input.clone(),
+            expected: proof_hash,
+            difficulty: attestation_request.difficulty,
+            reply: reply_tx,
+        };
+        if self.verify_tx.send(job).is_err() {
+            return Err(Status::internal("randomx verifier unavailable"));
+        }
+        match reply_rx.await {
+            Ok(Ok(true)) => {}
+            Ok(Ok(false)) => {
+                tracing::warn!("proof failed randomx verification");
+                return invalid(attestation_request.session_id);
+            }
+            Ok(Err(e)) => {
+                tracing::error!(error = %e, "randomx verification errored");
+                return invalid(attestation_request.session_id);
+            }
+            Err(_) => return Err(Status::internal("randomx verifier dropped reply")),
         }
 
         let mut hasher = Sha256::new();
-        for hash in &proof_hashes {
-            hasher.update(hash);
-        }
+        hasher.update(proof_hash);
         let mut signature_bytes = [0u8; 32];
         signature_bytes.copy_from_slice(&hasher.finalize());
 

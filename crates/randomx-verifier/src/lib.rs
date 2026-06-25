@@ -63,6 +63,26 @@ impl RandomXVerifier {
         Ok(Self { vm })
     }
 
+    /// Computes the RandomX hash of `input` under this verifier's key.
+    ///
+    /// Useful for producing the expected hash a proof must match. Returns an
+    /// error if the underlying VM reports an unexpected hash length.
+    pub fn hash(&mut self, input: &[u8]) -> Result<[u8; 32], RandomXError> {
+        let computed = self
+            .vm
+            .calculate_hash(input)
+            .map_err(|e| RandomXError::HashFailed(e.to_string()))?;
+        if computed.len() != 32 {
+            return Err(RandomXError::HashFailed(format!(
+                "unexpected hash length {}",
+                computed.len()
+            )));
+        }
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&computed);
+        Ok(out)
+    }
+
     /// Verifies that `input` hashes under RandomX to `expected_hash` and that
     /// the resulting hash meets `difficulty`.
     ///
@@ -77,11 +97,8 @@ impl RandomXVerifier {
         expected_hash: &[u8; 32],
         difficulty: u64,
     ) -> Result<bool, RandomXError> {
-        let computed = self
-            .vm
-            .calculate_hash(input)
-            .map_err(|e| RandomXError::HashFailed(e.to_string()))?;
-        if computed.as_slice() != expected_hash.as_slice() {
+        let computed = self.hash(input)?;
+        if &computed != expected_hash {
             tracing::trace!("randomx hash mismatch against expected proof hash");
             return Ok(false);
         }

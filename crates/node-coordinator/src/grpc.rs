@@ -3,7 +3,6 @@
 use alloy_primitives::Signature;
 use chrono::{DateTime, Utc};
 use common::{NodeId, NodeSignature, PartialProof};
-use sha2::{Digest, Sha256};
 use tonic::metadata::{Ascii, MetadataValue};
 use tonic::transport::{Channel, Endpoint};
 
@@ -15,18 +14,6 @@ mod proto {
 }
 
 const API_KEY_HEADER: &str = "x-api-key";
-
-/// Aggregates a proof set into a single 32-byte hash using SHA-256 over each
-/// proof hash in order.
-fn hash_proof_set(proof_set: &[PartialProof]) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    for proof in proof_set {
-        hasher.update(proof.proof_hash);
-    }
-    let mut out = [0u8; 32];
-    out.copy_from_slice(hasher.finalize().as_ref());
-    out
-}
 
 /// gRPC client that requests attestation signatures from a single Primora node
 /// over a lazily-connected channel, authenticating with a shared API key.
@@ -81,22 +68,24 @@ impl NodeClient for GrpcNodeClient {
             endpoint = %self.endpoint,
             "requesting attestation"
         );
-        let proof_hash = hash_proof_set(proof_set);
+        // RandomX verification is per-proof: the node re-hashes the exact
+        // preimage and checks it against the claimed hash. The attestation
+        // therefore carries the representative (first) proof of the set with
+        // its input, hash, and difficulty so the node can verify real work.
+        let first = proof_set.first();
         let request_body = proto::AttestationRequest {
-            session_id: proof_set
-                .first()
+            session_id: first
                 .map(|proof| proof.session_id.0.clone())
                 .unwrap_or_default(),
-            wallet: proof_set
-                .first()
-                .map(|proof| proof.wallet.to_string())
-                .unwrap_or_default(),
+            wallet: first.map(|proof| proof.wallet.to_string()).unwrap_or_default(),
             commodity: String::new(),
-            proof_hash: Some(proto::ProofHash {
-                value: proof_hash.to_vec(),
+            proof_hash: first.map(|proof| proto::ProofHash {
+                value: proof.proof_hash.to_vec(),
             }),
             requesting_node_id: assigned_node_id.0.clone(),
             requested_at: None,
+            proof_input: first.map(|proof| proof.proof_input.clone()).unwrap_or_default(),
+            difficulty: first.map(|proof| proof.difficulty).unwrap_or(0),
         };
 
         let mut request = tonic::Request::new(request_body);
@@ -150,10 +139,5 @@ mod tests {
             .await
             .expect("lazy channel construction should not connect");
         assert_eq!(client.endpoint(), endpoint);
-    }
-
-    #[test]
-    fn test_hash_proof_set_empty_is_stable() {
-        assert_eq!(hash_proof_set(&[]), hash_proof_set(&[]));
     }
 }

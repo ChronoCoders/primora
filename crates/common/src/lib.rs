@@ -127,8 +127,12 @@ pub struct PartialProof {
     pub sequence: u32,
     /// Reported hashrate in H/s.
     pub hashrate: u64,
-    /// Proof hash bytes.
+    /// Proof hash bytes: the RandomX hash of `proof_input`.
     pub proof_hash: [u8; 32],
+    /// Exact RandomX preimage the client hashed. Empty when not yet captured.
+    pub proof_input: Vec<u8>,
+    /// Difficulty target this proof claims.
+    pub difficulty: u64,
     /// Submission timestamp.
     pub submitted_at: DateTime<Utc>,
     /// Node signature over the proof, present only after Full-mode signing.

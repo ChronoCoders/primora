@@ -45,9 +45,11 @@ message AttestationRequest {
   string session_id = 1;
   string wallet = 2;
   string commodity = 3;
-  ProofHash proof_hash = 4;
+  ProofHash proof_hash = 4; // RandomX hash of proof_input
   string requesting_node_id = 5; // the assigned node
   google.protobuf.Timestamp requested_at = 6;
+  bytes proof_input = 7; // exact RandomX preimage the client hashed
+  uint64 difficulty = 8; // difficulty target this proof claims
 }
 
 // Node B/C reply.

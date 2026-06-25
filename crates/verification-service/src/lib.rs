@@ -85,8 +85,15 @@ pub struct SubmitProofRequest {
     pub sequence: u32,
     /// Reported hashrate in H/s.
     pub hashrate: u64,
-    /// Hex-encoded proof hash.
+    /// Hex-encoded proof hash: the RandomX hash of `proof_input`.
     pub proof_hash: String,
+    /// Hex-encoded exact RandomX preimage the client hashed. Defaults to empty
+    /// for backward compatibility with clients that predate RandomX wiring.
+    #[serde(default)]
+    pub proof_input: String,
+    /// Difficulty target this proof claims. Defaults to 0.
+    #[serde(default)]
+    pub difficulty: u64,
 }
 
 /// Response body for a submitted proof.
@@ -298,6 +305,12 @@ async fn submit_proof(
         .await?
         .ok_or(ApiError::NotFound)?;
     let proof_hash = parse_hash(&body.proof_hash, "invalid proof_hash")?;
+    let proof_input = if body.proof_input.is_empty() {
+        Vec::new()
+    } else {
+        alloy_primitives::hex::decode(&body.proof_input)
+            .map_err(|_| ApiError::BadRequest("invalid proof_input"))?
+    };
 
     let proof = PartialProof {
         session_id: session_id.clone(),
@@ -305,6 +318,8 @@ async fn submit_proof(
         sequence: body.sequence,
         hashrate: body.hashrate,
         proof_hash,
+        proof_input,
+        difficulty: body.difficulty,
         submitted_at: Utc::now(),
         signature: None,
     };

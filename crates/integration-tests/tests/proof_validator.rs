@@ -26,6 +26,8 @@ fn proof(hashrate: u64, signature: Option<Signature>) -> PartialProof {
         sequence: 1,
         hashrate,
         proof_hash: [0u8; 32],
+        proof_input: Vec::new(),
+        difficulty: 0,
         submitted_at: Utc::now(),
         signature,
     }
