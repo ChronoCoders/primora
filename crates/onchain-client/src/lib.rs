@@ -179,12 +179,18 @@ impl OracleSubmitter {
         price: u128,
     ) -> Result<TxHash, OnchainClientError> {
         let contract = IOracleAggregator::new(self.aggregator_address, &self.provider);
-        let pending = contract
+        let receipt = contract
             .submitPrice(commodity, U256::from(price))
             .send()
             .await
+            .map_err(|e| OnchainClientError::Contract(e.to_string()))?
+            .get_receipt()
+            .await
             .map_err(|e| OnchainClientError::Contract(e.to_string()))?;
-        let tx_hash = *pending.tx_hash();
+        if !receipt.status() {
+            return Err(OnchainClientError::Contract("transaction reverted".into()));
+        }
+        let tx_hash = receipt.transaction_hash;
         tracing::info!(commodity = %commodity, price = %price, tx_hash = %tx_hash, "submitted price to oracle aggregator");
         Ok(tx_hash)
     }

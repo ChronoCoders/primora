@@ -6,12 +6,13 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use alloy::primitives::Address;
 use alloy::signers::local::PrivateKeySigner;
 use anomaly_engine::AnomalyEngine;
 use common::{AnomalyEvent, NodeId};
 use mint_ceiling::MintCeilingCalculator;
 use node_coordinator::{GrpcNodeClient, NodeCoordinator};
-use onchain_client::OnchainClient;
+use onchain_client::{OnchainClient, OracleSubmitter};
 use postgres_store::PostgresStore;
 use rate_limiter::RateLimiter;
 use session_manager::SessionStore;
@@ -162,6 +163,39 @@ async fn main() {
         }
     };
 
+    let oracle_submitter = match (
+        std::env::var("ORACLE_AGGREGATOR_ADDRESS").ok(),
+        std::env::var("ORACLE_SUBMITTER_KEY_HEX").ok(),
+    ) {
+        (Some(addr_str), Some(key_hex)) => {
+            let address = match Address::from_str(&addr_str) {
+                Ok(address) => address,
+                Err(e) => {
+                    tracing::error!(error = %e, "startup failed: ORACLE_AGGREGATOR_ADDRESS parse");
+                    std::process::exit(1);
+                }
+            };
+            let submitter_signer = match PrivateKeySigner::from_str(&key_hex) {
+                Ok(signer) => signer,
+                Err(e) => {
+                    tracing::error!(error = %e, "startup failed: ORACLE_SUBMITTER_KEY_HEX parse");
+                    std::process::exit(1);
+                }
+            };
+            match OracleSubmitter::new(&config.rpc_url, submitter_signer, address).await {
+                Ok(submitter) => Some(Arc::new(submitter)),
+                Err(e) => {
+                    tracing::error!(error = %e, "startup failed: oracle submitter init");
+                    std::process::exit(1);
+                }
+            }
+        }
+        _ => {
+            tracing::info!("oracle submitter not configured, TWAP submission disabled");
+            None
+        }
+    };
+
     let mut node_ids: Vec<NodeId> = Vec::new();
     let mut first_client: Option<GrpcNodeClient> = None;
     for endpoint in &config.node_endpoints {
@@ -220,6 +254,7 @@ async fn main() {
         node_coordinator: Arc::new(node_coordinator),
         signing_key: Arc::new(signer),
         oracle_reader: Arc::new(oracle_reader),
+        oracle_submitter,
         twap_sessions: Arc::new(RwLock::new(HashMap::new())),
     };
 
