@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use alloy_primitives::{Address, Signature, U256};
 use axum::extract::{ConnectInfo, Path, Query, State};
-use axum::http::{Method, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -23,7 +23,6 @@ use rate_limiter::RateLimitResult;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use twap_calculator::TwapCalculator;
-use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
 /// Number of blocks behind the head used to derive the session seed.
@@ -697,14 +696,9 @@ async fn health_check() -> (StatusCode, Json<serde_json::Value>) {
 
 /// Builds the application router with all routes and shared state.
 ///
-/// The read endpoints under `/wallets/:wallet/*` are called from the frontend
-/// in a browser, so a CORS layer allows cross-origin GET requests. It is
-/// permissive (`Any` origin) for now; production must restrict the allowed
-/// origin to the real frontend domain.
+/// Routes are served behind Cloudflare on a single origin; the frontend and
+/// API share a domain, so no CORS layer is required.
 pub fn router(state: AppState) -> Router {
-    let cors = CorsLayer::new()
-        .allow_methods([Method::GET])
-        .allow_origin(Any);
     Router::new()
         .route("/sessions", post(create_session))
         .route("/sessions/:session_id/proofs", post(submit_proof))
@@ -715,7 +709,6 @@ pub fn router(state: AppState) -> Router {
         .route("/health", get(health_check))
         .route("/metrics", get(metrics_handler))
         .layer(TraceLayer::new_for_http())
-        .layer(cors)
         .with_state(state)
 }
 
