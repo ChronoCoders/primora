@@ -210,6 +210,55 @@ impl SessionStore {
         }
     }
 
+    /// Adds a single proof's claimed hashrate to the session's running sum,
+    /// refreshing the one-hour TTL. The average over the session is this sum
+    /// divided by the proof count at session end.
+    pub async fn add_hashrate_sample(
+        &self,
+        session_id: &SessionId,
+        hashrate: u64,
+    ) -> Result<(), SessionManagerError> {
+        let mut conn = self.conn.clone();
+        let key = format!("hashrate_sum:{}", session_id.0);
+        let _: i64 = redis::cmd("INCRBY")
+            .arg(&key)
+            .arg(hashrate)
+            .query_async(&mut conn)
+            .await?;
+        let _: () = redis::cmd("EXPIRE")
+            .arg(&key)
+            .arg(TTL_SECS)
+            .query_async(&mut conn)
+            .await?;
+        Ok(())
+    }
+
+    /// Returns the integer average claimed hashrate over the session: the
+    /// accumulated hashrate sum divided by the proof count. Returns 0 when no
+    /// proofs have been counted.
+    pub async fn get_average_hashrate(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<u64, SessionManagerError> {
+        let mut conn = self.conn.clone();
+        let sum_key = format!("hashrate_sum:{}", session_id.0);
+        let count_key = format!("proof_count:{}", session_id.0);
+        let sum: Option<i64> = redis::cmd("GET")
+            .arg(&sum_key)
+            .query_async(&mut conn)
+            .await?;
+        let count: Option<i64> = redis::cmd("GET")
+            .arg(&count_key)
+            .query_async(&mut conn)
+            .await?;
+        let count = count.unwrap_or(0).max(0) as u64;
+        if count == 0 {
+            return Ok(0);
+        }
+        let sum = sum.unwrap_or(0).max(0) as u64;
+        Ok(sum / count)
+    }
+
     /// Increments and returns the proof counter for a session.
     pub async fn increment_proof_count(
         &self,
@@ -272,12 +321,14 @@ impl SessionStore {
         let commit_key = format!("commit:{}", session_id.0);
         let count_key = format!("proof_count:{}", session_id.0);
         let proofs_key = format!("proofs:{}", session_id.0);
+        let hashrate_key = format!("hashrate_sum:{}", session_id.0);
         let _: () = redis::cmd("DEL")
             .arg(&session_key)
             .arg(&lookup_key)
             .arg(&commit_key)
             .arg(&count_key)
             .arg(&proofs_key)
+            .arg(&hashrate_key)
             .query_async(&mut conn)
             .await?;
         Ok(())
@@ -348,5 +399,26 @@ mod tests {
         let store = SessionStore::new(TEST_URL).await.unwrap();
         let id = SessionId("nonexistent-session-xyz".to_string());
         assert_eq!(store.get_proof_count(&id).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_average_hashrate_missing_is_zero() {
+        let store = SessionStore::new(TEST_URL).await.unwrap();
+        let id = SessionId("nonexistent-hashrate-xyz".to_string());
+        assert_eq!(store.get_average_hashrate(&id).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_hashrate_average() {
+        let store = SessionStore::new(TEST_URL).await.unwrap();
+        let id = store.create_session(&sample_ctx()).await.unwrap();
+        for hashrate in [1000u64, 2000, 3000] {
+            store.add_hashrate_sample(&id, hashrate).await.unwrap();
+            store.increment_proof_count(&id).await.unwrap();
+        }
+        assert_eq!(store.get_average_hashrate(&id).await.unwrap(), 2000);
+        store.delete_session(&Address::ZERO, &id).await.unwrap();
     }
 }

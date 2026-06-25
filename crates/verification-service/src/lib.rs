@@ -332,6 +332,24 @@ async fn submit_proof(
             tracing::warn!(error = %e, "failed to increment proof count");
         }
     }
+    if !matches!(result, ValidationResult::Invalid(_)) {
+        match state
+            .session_manager
+            .add_hashrate_sample(&session_id, body.hashrate)
+            .await
+        {
+            Ok(()) => {
+                tracing::debug!(
+                    session_id = %session_id.0,
+                    hashrate = body.hashrate,
+                    "recorded hashrate sample"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to record hashrate sample");
+            }
+        }
+    }
     state.session_manager.store_proof(&session_id, proof).await?;
 
     let client_type_label = format!("{:?}", ctx.client_type);
@@ -507,16 +525,20 @@ async fn end_session(
             let duration_secs =
                 (twap.session_end - twap.session_start).num_seconds().max(0) as u64;
             let payout_config = payout_calculator::default_config();
-            let proof_count = state
+            // The average is over the bounded client-claimed hashrates: the
+            // PreFilter rejects rates above the per-client physical max
+            // (HashrateImpossible), so claimed rates cannot run unbounded.
+            // TODO(phase3-verified-hashrate): the hardened model counts
+            // node-verified RandomX solutions per unit time rather than
+            // trusting the bounded client claim.
+            let avg_hashrate = state
                 .session_manager
-                .get_proof_count(&session_id)
+                .get_average_hashrate(&session_id)
                 .await
                 .unwrap_or_else(|e| {
-                    tracing::warn!(error = %e, "failed to read proof count, using 0");
+                    tracing::warn!(error = %e, "failed to read average hashrate, using 0");
                     0
                 });
-            // TODO(phase2-hashrate): track real per-proof hashrate in Redis
-            let avg_hashrate: u64 = if proof_count > 0 { 2_500 } else { 0 };
             let payout_result = payout_calculator::calculate_payout(
                 avg_hashrate,
                 duration_secs,
