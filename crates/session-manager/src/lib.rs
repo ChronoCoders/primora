@@ -13,10 +13,6 @@ const TTL_SECS: i64 = 3600;
 const COMMIT_PENDING: &str = "pending";
 
 /// Summary of an active session for a wallet, for the Overview page.
-///
-/// [`SessionContext`] does not persist a session-creation timestamp, so this
-/// summary exposes `last_submission_at` (the only timestamp stored, `None`
-/// until the first proof) rather than a fabricated start time.
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionSummary {
     /// Session identifier.
@@ -25,7 +21,9 @@ pub struct SessionSummary {
     pub commodity: String,
     /// Number of proofs counted for the session.
     pub proof_count: u32,
-    /// Timestamp of the last proof submission, if any.
+    /// UTC timestamp when the session was created.
+    pub started_at: DateTime<Utc>,
+    /// Timestamp of the last proof submission, `None` until the first proof.
     pub last_submission_at: Option<DateTime<Utc>>,
     /// Session lifecycle status; a session present in Redis is active.
     pub status: String,
@@ -369,6 +367,7 @@ impl SessionStore {
                     session_id,
                     commodity: format!("{:?}", ctx.commodity),
                     proof_count: count.unwrap_or(0).max(0) as u32,
+                    started_at: ctx.started_at,
                     last_submission_at: ctx.last_submission_at,
                     status: "active".to_string(),
                 });
@@ -421,6 +420,7 @@ mod tests {
             ip: None,
             client_type: ClientType::Cli,
             active_sessions_count: 0,
+            started_at: Utc::now(),
             last_submission_at: None,
             recent_proof_count: 0,
             assigned_node_id: None,
@@ -489,8 +489,13 @@ mod tests {
         let id = store.create_session(&ctx).await.unwrap();
         let wallet = format!("{}", ctx.wallet);
         let sessions = store.list_sessions_for_wallet(&wallet).await.unwrap();
-        assert!(sessions.iter().any(|s| s.session_id == id.0));
-        assert!(sessions.iter().all(|s| s.status == "active"));
+        let summary = sessions
+            .iter()
+            .find(|s| s.session_id == id.0)
+            .expect("created session present in listing");
+        assert_eq!(summary.status, "active");
+        assert_eq!(summary.started_at, ctx.started_at);
+        assert!(summary.last_submission_at.is_none());
         store.delete_session(&Address::ZERO, &id).await.unwrap();
     }
 

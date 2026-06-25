@@ -112,6 +112,7 @@ mod tests {
             ip: None,
             client_type: client,
             active_sessions_count: active,
+            started_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
             last_submission_at: last,
             recent_proof_count: 0,
             assigned_node_id: None,

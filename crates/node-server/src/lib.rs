@@ -193,6 +193,7 @@ impl NodeService for NodeServiceImpl {
                 ip: None,
                 client_type: ClientType::Desktop,
                 active_sessions_count: 1,
+                started_at: Utc::now(),
                 last_submission_at: None,
                 recent_proof_count: 0,
                 assigned_node_id: None,

@@ -275,6 +275,7 @@ async fn create_session(
         ip: Some(ip),
         client_type,
         active_sessions_count,
+        started_at: Utc::now(),
         last_submission_at: None,
         recent_proof_count: 0,
         assigned_node_id,

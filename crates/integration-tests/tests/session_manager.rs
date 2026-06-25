@@ -20,6 +20,7 @@ fn sample_ctx() -> SessionContext {
         ip: None,
         client_type: ClientType::Browser,
         active_sessions_count: 0,
+        started_at: chrono::Utc::now(),
         last_submission_at: None,
         recent_proof_count: 0,
         assigned_node_id: None,

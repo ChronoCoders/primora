@@ -106,6 +106,8 @@ pub struct SessionContext {
     pub client_type: ClientType,
     /// Count of concurrently active sessions for this wallet.
     pub active_sessions_count: u32,
+    /// UTC timestamp when the session was created.
+    pub started_at: DateTime<Utc>,
     /// Timestamp of the last submission, if any.
     pub last_submission_at: Option<DateTime<Utc>>,
     /// Count of recent proofs observed in this session.
