@@ -7,8 +7,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use alloy_primitives::{Address, Signature, U256};
-use axum::extract::{ConnectInfo, Path, State};
-use axum::http::StatusCode;
+use axum::extract::{ConnectInfo, Path, Query, State};
+use axum::http::{Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -23,10 +23,16 @@ use rate_limiter::RateLimitResult;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use twap_calculator::TwapCalculator;
+use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
 /// Number of blocks behind the head used to derive the session seed.
 const SEED_BLOCK_OFFSET: u64 = 3;
+
+/// Default number of payout rows returned by the payouts endpoint.
+const DEFAULT_PAYOUT_LIMIT: i64 = 50;
+/// Maximum number of payout rows the payouts endpoint will return.
+const MAX_PAYOUT_LIMIT: i64 = 200;
 
 /// Shared application state injected into every handler.
 #[derive(Clone)]
@@ -119,6 +125,13 @@ pub struct EndSessionResponse {
     pub status: String,
 }
 
+/// Query parameters for the wallet payouts endpoint.
+#[derive(Debug, Deserialize)]
+pub struct PayoutsQuery {
+    /// Maximum rows to return. Defaults to 50, clamped to a maximum of 200.
+    pub limit: Option<i64>,
+}
+
 /// Errors returned while running the service.
 #[derive(Debug)]
 pub enum ServiceError {
@@ -190,6 +203,13 @@ impl From<rate_limiter::RateLimiterError> for ApiError {
 impl From<onchain_client::OnchainClientError> for ApiError {
     fn from(e: onchain_client::OnchainClientError) -> Self {
         tracing::error!(error = %e, "onchain client error");
+        Self::Internal
+    }
+}
+
+impl From<postgres_store::PostgresStoreError> for ApiError {
+    fn from(e: postgres_store::PostgresStoreError) -> Self {
+        tracing::error!(error = %e, "postgres store error");
         Self::Internal
     }
 }
@@ -605,6 +625,59 @@ async fn end_session(
     }
 }
 
+/// Formats an address the way `postgres-store` persists wallets
+/// (`format!("{:?}", _)`), so read queries match stored rows.
+fn wallet_db_key(wallet: &Address) -> String {
+    format!("{:?}", wallet)
+}
+
+/// Parses a wallet path parameter as an address, returning a 400 on failure.
+fn parse_wallet(raw: &str) -> Result<Address, ApiError> {
+    raw.parse::<Address>()
+        .map_err(|_| ApiError::BadRequest("invalid wallet address"))
+}
+
+/// Returns a wallet's payout history, newest first. The `limit` query parameter
+/// defaults to 50 and is clamped to a maximum of 200.
+async fn wallet_payouts(
+    State(state): State<AppState>,
+    Path(wallet): Path<String>,
+    Query(params): Query<PayoutsQuery>,
+) -> Result<Json<Vec<postgres_store::PayoutRow>>, ApiError> {
+    let address = parse_wallet(&wallet)?;
+    let key = wallet_db_key(&address);
+    let limit = params
+        .limit
+        .unwrap_or(DEFAULT_PAYOUT_LIMIT)
+        .clamp(1, MAX_PAYOUT_LIMIT);
+    let rows = state.postgres_store.get_payouts_for_wallet(&key, limit).await?;
+    Ok(Json(rows))
+}
+
+/// Returns a wallet's earnings aggregated by commodity.
+async fn wallet_earnings(
+    State(state): State<AppState>,
+    Path(wallet): Path<String>,
+) -> Result<Json<Vec<postgres_store::EarningsRow>>, ApiError> {
+    let address = parse_wallet(&wallet)?;
+    let key = wallet_db_key(&address);
+    let rows = state.postgres_store.get_earnings_by_commodity(&key).await?;
+    Ok(Json(rows))
+}
+
+/// Returns a wallet's active sessions. Redis session keys use the address
+/// Display form (see `SessionStore::create_session`), distinct from the
+/// debug-formatted wallet persisted in Postgres.
+async fn wallet_sessions(
+    State(state): State<AppState>,
+    Path(wallet): Path<String>,
+) -> Result<Json<Vec<session_manager::SessionSummary>>, ApiError> {
+    let address = parse_wallet(&wallet)?;
+    let key = address.to_string();
+    let rows = state.session_manager.list_sessions_for_wallet(&key).await?;
+    Ok(Json(rows))
+}
+
 /// Exposes the Prometheus metrics registry in text exposition format.
 pub async fn metrics_handler() -> (StatusCode, String) {
     (StatusCode::OK, metrics::metrics_handler())
@@ -619,14 +692,26 @@ async fn health_check() -> (StatusCode, Json<serde_json::Value>) {
 }
 
 /// Builds the application router with all routes and shared state.
+///
+/// The read endpoints under `/wallets/:wallet/*` are called from the frontend
+/// in a browser, so a CORS layer allows cross-origin GET requests. It is
+/// permissive (`Any` origin) for now; production must restrict the allowed
+/// origin to the real frontend domain.
 pub fn router(state: AppState) -> Router {
+    let cors = CorsLayer::new()
+        .allow_methods([Method::GET])
+        .allow_origin(Any);
     Router::new()
         .route("/sessions", post(create_session))
         .route("/sessions/:session_id/proofs", post(submit_proof))
         .route("/sessions/:session_id/end", post(end_session))
+        .route("/wallets/:wallet/payouts", get(wallet_payouts))
+        .route("/wallets/:wallet/earnings", get(wallet_earnings))
+        .route("/wallets/:wallet/sessions", get(wallet_sessions))
         .route("/health", get(health_check))
         .route("/metrics", get(metrics_handler))
         .layer(TraceLayer::new_for_http())
+        .layer(cors)
         .with_state(state)
 }
 
@@ -687,6 +772,19 @@ mod tests {
         let (status, body) = metrics_handler().await;
         assert_eq!(status, StatusCode::OK);
         assert!(!body.is_empty());
+    }
+
+    #[test]
+    fn test_invalid_wallet_returns_400() {
+        let err = parse_wallet("not-an-address").unwrap_err();
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn test_valid_wallet_parses_and_db_key_is_debug_format() {
+        let addr = parse_wallet("0x0000000000000000000000000000000000000000").unwrap();
+        assert_eq!(wallet_db_key(&addr), format!("{:?}", addr));
     }
 
     #[test]

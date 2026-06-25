@@ -3,12 +3,33 @@
 //! Redis-backed commit-reveal and session lifecycle management.
 
 use alloy_primitives::Address;
+use chrono::{DateTime, Utc};
 use common::{PartialProof, SessionContext, SessionId};
 use redis::aio::MultiplexedConnection;
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 const TTL_SECS: i64 = 3600;
 const COMMIT_PENDING: &str = "pending";
+
+/// Summary of an active session for a wallet, for the Overview page.
+///
+/// [`SessionContext`] does not persist a session-creation timestamp, so this
+/// summary exposes `last_submission_at` (the only timestamp stored, `None`
+/// until the first proof) rather than a fabricated start time.
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionSummary {
+    /// Session identifier.
+    pub session_id: String,
+    /// Backing commodity name.
+    pub commodity: String,
+    /// Number of proofs counted for the session.
+    pub proof_count: u32,
+    /// Timestamp of the last proof submission, if any.
+    pub last_submission_at: Option<DateTime<Utc>>,
+    /// Session lifecycle status; a session present in Redis is active.
+    pub status: String,
+}
 
 /// Errors returned by the session store.
 #[derive(Debug)]
@@ -309,6 +330,57 @@ impl SessionStore {
         Ok(count)
     }
 
+    /// Lists active sessions for a wallet, scanning `session:{wallet}:*` keys
+    /// (non-blocking SCAN) and projecting each into a [`SessionSummary`].
+    ///
+    /// `wallet` must be the Display form of the address, matching the key
+    /// written by [`SessionStore::create_session`] (distinct from the
+    /// debug-formatted wallet persisted in Postgres).
+    pub async fn list_sessions_for_wallet(
+        &self,
+        wallet: &str,
+    ) -> Result<Vec<SessionSummary>, SessionManagerError> {
+        let mut conn = self.conn.clone();
+        let pattern = format!("session:{wallet}:*");
+        let prefix = format!("session:{wallet}:");
+        let mut cursor: u64 = 0;
+        let mut summaries = Vec::new();
+        loop {
+            let (next, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(&pattern)
+                .arg("COUNT")
+                .arg(100i64)
+                .query_async(&mut conn)
+                .await?;
+            for key in keys {
+                let payload: Option<String> =
+                    redis::cmd("GET").arg(&key).query_async(&mut conn).await?;
+                let Some(payload) = payload else {
+                    continue;
+                };
+                let ctx: SessionContext = serde_json::from_str(&payload)?;
+                let session_id = key.strip_prefix(&prefix).unwrap_or(&key).to_string();
+                let count_key = format!("proof_count:{session_id}");
+                let count: Option<i64> =
+                    redis::cmd("GET").arg(&count_key).query_async(&mut conn).await?;
+                summaries.push(SessionSummary {
+                    session_id,
+                    commodity: format!("{:?}", ctx.commodity),
+                    proof_count: count.unwrap_or(0).max(0) as u32,
+                    last_submission_at: ctx.last_submission_at,
+                    status: "active".to_string(),
+                });
+            }
+            cursor = next;
+            if cursor == 0 {
+                break;
+            }
+        }
+        Ok(summaries)
+    }
+
     /// Deletes all keys associated with a session.
     pub async fn delete_session(
         &self,
@@ -407,6 +479,19 @@ mod tests {
         let store = SessionStore::new(TEST_URL).await.unwrap();
         let id = SessionId("nonexistent-hashrate-xyz".to_string());
         assert_eq!(store.get_average_hashrate(&id).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_list_sessions_for_wallet() {
+        let store = SessionStore::new(TEST_URL).await.unwrap();
+        let ctx = sample_ctx();
+        let id = store.create_session(&ctx).await.unwrap();
+        let wallet = format!("{}", ctx.wallet);
+        let sessions = store.list_sessions_for_wallet(&wallet).await.unwrap();
+        assert!(sessions.iter().any(|s| s.session_id == id.0));
+        assert!(sessions.iter().all(|s| s.status == "active"));
+        store.delete_session(&Address::ZERO, &id).await.unwrap();
     }
 
     #[tokio::test]

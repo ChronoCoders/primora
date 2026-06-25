@@ -75,6 +75,34 @@ pub struct PendingProposalRow {
     pub created_at: DateTime<Utc>,
 }
 
+/// A payout (mint proposal) row projected for a wallet's payout history.
+#[derive(Debug, Clone, Serialize)]
+pub struct PayoutRow {
+    /// Source session identifier.
+    pub session_id: String,
+    /// Recipient wallet, debug-formatted address string.
+    pub wallet: String,
+    /// Gross PRM as a decimal string (NUMERIC rendered as text).
+    pub gross_prm: String,
+    /// Backing commodity name.
+    pub commodity: String,
+    /// Current proposal status.
+    pub status: String,
+    /// Proposal creation time.
+    pub created_at: DateTime<Utc>,
+}
+
+/// Aggregated earnings for a single commodity for one wallet.
+#[derive(Debug, Clone, Serialize)]
+pub struct EarningsRow {
+    /// Backing commodity name.
+    pub commodity: String,
+    /// Number of proposals (sessions) recorded for this commodity.
+    pub session_count: i64,
+    /// Summed gross PRM as a decimal string (NUMERIC SUM rendered as text).
+    pub total_gross_prm: String,
+}
+
 /// Postgres-backed store for anomaly events and mint proposals.
 pub struct PostgresStore {
     pool: sqlx::PgPool,
@@ -179,6 +207,66 @@ impl PostgresStore {
         }
         Ok(proposals)
     }
+
+    /// Returns a wallet's payout history (mint proposals) newest first, capped at
+    /// `limit`. `wallet` must already be debug-formatted (`format!("{:?}", _)`)
+    /// to match stored rows. Gross PRM is cast to text to preserve full NUMERIC
+    /// precision without floating point.
+    pub async fn get_payouts_for_wallet(
+        &self,
+        wallet: &str,
+        limit: i64,
+    ) -> Result<Vec<PayoutRow>, PostgresStoreError> {
+        let rows = sqlx::query(
+            "SELECT session_id, wallet, gross_prm::text AS gross_prm, commodity, status, created_at \
+             FROM mint_proposals WHERE wallet = $1 ORDER BY created_at DESC LIMIT $2",
+        )
+        .bind(wallet)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut payouts = Vec::with_capacity(rows.len());
+        for row in rows {
+            payouts.push(PayoutRow {
+                session_id: row.try_get("session_id")?,
+                wallet: row.try_get("wallet")?,
+                gross_prm: row.try_get("gross_prm")?,
+                commodity: row.try_get("commodity")?,
+                status: row.try_get("status")?,
+                created_at: row.try_get("created_at")?,
+            });
+        }
+        Ok(payouts)
+    }
+
+    /// Returns a wallet's earnings aggregated by commodity. `wallet` must already
+    /// be debug-formatted (`format!("{:?}", _)`) to match stored rows. The gross
+    /// PRM sum is cast to text to preserve full NUMERIC precision without
+    /// floating point.
+    pub async fn get_earnings_by_commodity(
+        &self,
+        wallet: &str,
+    ) -> Result<Vec<EarningsRow>, PostgresStoreError> {
+        let rows = sqlx::query(
+            "SELECT commodity, COUNT(*) AS session_count, \
+             COALESCE(SUM(gross_prm), 0)::text AS total_gross_prm \
+             FROM mint_proposals WHERE wallet = $1 GROUP BY commodity",
+        )
+        .bind(wallet)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut earnings = Vec::with_capacity(rows.len());
+        for row in rows {
+            earnings.push(EarningsRow {
+                commodity: row.try_get("commodity")?,
+                session_count: row.try_get("session_count")?,
+                total_gross_prm: row.try_get("total_gross_prm")?,
+            });
+        }
+        Ok(earnings)
+    }
 }
 
 #[cfg(test)]
@@ -272,5 +360,35 @@ mod tests {
             .unwrap();
         let pending = store.get_pending_proposals().await.unwrap();
         assert!(pending.iter().all(|row| row.status == "Pending"));
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_get_payouts_for_wallet() {
+        let store = store().await;
+        store
+            .insert_mint_proposal(&dummy_proposal("sess-payout"))
+            .await
+            .unwrap();
+        let wallet = format!("{:?}", Address::ZERO);
+        let payouts = store.get_payouts_for_wallet(&wallet, 50).await.unwrap();
+        assert!(payouts.iter().any(|p| p.session_id == "sess-payout"));
+        assert!(payouts.iter().all(|p| p.wallet == wallet));
+        assert!(payouts.iter().all(|p| p.gross_prm.parse::<u128>().is_ok()));
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_get_earnings_by_commodity() {
+        let store = store().await;
+        store
+            .insert_mint_proposal(&dummy_proposal("sess-earn"))
+            .await
+            .unwrap();
+        let wallet = format!("{:?}", Address::ZERO);
+        let earnings = store.get_earnings_by_commodity(&wallet).await.unwrap();
+        assert!(earnings.iter().any(|e| e.commodity == "Gold"));
+        assert!(earnings.iter().all(|e| e.session_count >= 1));
+        assert!(earnings.iter().all(|e| e.total_gross_prm.parse::<u128>().is_ok()));
     }
 }
