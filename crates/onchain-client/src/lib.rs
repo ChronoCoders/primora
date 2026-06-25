@@ -4,13 +4,29 @@
 
 use std::sync::Arc;
 
-use alloy::primitives::Bytes;
-use alloy::providers::{Provider, ProviderBuilder, RootProvider};
+use alloy::network::EthereumWallet;
+use alloy::primitives::{Address, Bytes, TxHash, U256};
+use alloy::providers::{DynProvider, Provider, ProviderBuilder, RootProvider};
 use alloy::rpc::types::BlockNumberOrTag;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::signers::SignerSync;
 use alloy::transports::TransportError;
-use common::MintProposal;
+use common::{Commodity, MintProposal};
+
+#[allow(missing_docs, dead_code, non_snake_case, clippy::all)]
+mod oracle_abi {
+    use alloy::sol;
+
+    sol! {
+        #[sol(rpc)]
+        interface IOracleAggregator {
+            function submitPrice(uint8 commodity, uint256 price) external;
+            function getPriceUnchecked(uint8 commodity) external view returns (uint256 price, uint256 updatedAt, bool initialized);
+        }
+    }
+}
+
+use oracle_abi::IOracleAggregator;
 
 /// Errors returned by the on-chain client.
 #[derive(Debug)]
@@ -23,6 +39,8 @@ pub enum OnchainClientError {
     Serialization(serde_json::Error),
     /// The proposal could not be signed.
     Signing(alloy::signers::Error),
+    /// A contract call reverted or otherwise failed on-chain.
+    Contract(String),
 }
 
 impl std::fmt::Display for OnchainClientError {
@@ -32,6 +50,7 @@ impl std::fmt::Display for OnchainClientError {
             Self::InvalidUrl(url) => write!(f, "invalid rpc url: {url}"),
             Self::Serialization(e) => write!(f, "serialization error: {e}"),
             Self::Signing(e) => write!(f, "signing error: {e}"),
+            Self::Contract(msg) => write!(f, "contract error: {msg}"),
         }
     }
 }
@@ -43,6 +62,7 @@ impl std::error::Error for OnchainClientError {
             Self::InvalidUrl(_) => None,
             Self::Serialization(e) => Some(e),
             Self::Signing(e) => Some(e),
+            Self::Contract(_) => None,
         }
     }
 }
@@ -121,6 +141,66 @@ impl OnchainClient {
     }
 }
 
+/// Write-capable client scoped to a single on-chain authority: submitting
+/// backend-computed TWAP prices to the OracleAggregator via `submitPrice`. It
+/// holds a signer-backed provider and has no minting capability.
+pub struct OracleSubmitter {
+    provider: DynProvider,
+    aggregator_address: Address,
+}
+
+impl OracleSubmitter {
+    /// Builds a signer-backed HTTP client bound to the OracleAggregator at
+    /// `aggregator_address`. The wallet derived from `signing_key` is used only
+    /// to sign `submitPrice` transactions.
+    pub async fn new(
+        rpc_url: &str,
+        signing_key: PrivateKeySigner,
+        aggregator_address: Address,
+    ) -> Result<Self, OnchainClientError> {
+        let url = rpc_url
+            .parse()
+            .map_err(|_| OnchainClientError::InvalidUrl(rpc_url.to_string()))?;
+        let wallet = EthereumWallet::from(signing_key);
+        let provider = ProviderBuilder::new().wallet(wallet).connect_http(url).erased();
+        Ok(Self {
+            provider,
+            aggregator_address,
+        })
+    }
+
+    /// Submits a normalized 8-decimal `price` for `commodity` (the contract enum
+    /// ordinal) to the OracleAggregator and returns the transaction hash. A
+    /// divergence rejection or any other revert maps to
+    /// [`OnchainClientError::Contract`].
+    pub async fn submit_price(
+        &self,
+        commodity: u8,
+        price: u128,
+    ) -> Result<TxHash, OnchainClientError> {
+        let contract = IOracleAggregator::new(self.aggregator_address, &self.provider);
+        let pending = contract
+            .submitPrice(commodity, U256::from(price))
+            .send()
+            .await
+            .map_err(|e| OnchainClientError::Contract(e.to_string()))?;
+        let tx_hash = *pending.tx_hash();
+        tracing::info!(commodity = %commodity, price = %price, tx_hash = %tx_hash, "submitted price to oracle aggregator");
+        Ok(tx_hash)
+    }
+}
+
+/// Maps a [`Commodity`] to the OracleAggregator Solidity enum ordinal
+/// (Gold=0, Platinum=1, Silver=2, CrudeOil=3).
+pub fn commodity_to_u8(commodity: &Commodity) -> u8 {
+    match commodity {
+        Commodity::Gold => 0,
+        Commodity::Platinum => 1,
+        Commodity::Silver => 2,
+        Commodity::CrudeOil => 3,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     // Run with: cargo test -p onchain-client -- --ignored
@@ -177,5 +257,32 @@ mod tests {
         let signer = PrivateKeySigner::random();
         let signature = OnchainClient::sign_proposal(&proposal, &signer).unwrap();
         assert!(!signature.is_empty());
+    }
+
+    #[test]
+    fn test_commodity_to_u8() {
+        assert_eq!(commodity_to_u8(&Commodity::Gold), 0);
+        assert_eq!(commodity_to_u8(&Commodity::Platinum), 1);
+        assert_eq!(commodity_to_u8(&Commodity::Silver), 2);
+        assert_eq!(commodity_to_u8(&Commodity::CrudeOil), 3);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_submit_price_live() {
+        // Manual Anvil path: run `anvil`, deploy via contracts/script/Deploy.s.sol,
+        // then set `aggregator` to the printed OracleAggregator address. Anvil
+        // account 0 (key below) is the authorized submitter configured by the
+        // deploy script.
+        let key = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+        let signer: PrivateKeySigner = key.parse().unwrap();
+        let aggregator: Address = "0xa513E6E4b8f2a923D98304ec87F64353C4D5C853"
+            .parse()
+            .unwrap();
+        let submitter = OracleSubmitter::new("http://localhost:8545", signer, aggregator)
+            .await
+            .unwrap();
+        let tx_hash = submitter.submit_price(0, 320_400_000_000).await.unwrap();
+        assert_ne!(tx_hash, TxHash::ZERO);
     }
 }
