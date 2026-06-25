@@ -27,11 +27,24 @@ pub struct PayoutConfig {
     pub house_edge_bps: u128,
 }
 
-/// Returns the calibration values matching the spec illustrative example.
+/// Returns the calibrated payout configuration.
+///
+/// `price_coefficient_scaled` is calibrated against the Spec Section 4.6 worked
+/// example (Desktop, 8 hours, Gold): hashrate 2500 H/s, duration 28800s, Gold
+/// TWAP $3204 (`320_400_000_000` at 8 decimals), house edge 1700 bps. At
+/// `price_coefficient_scaled = 1_000` this yields redemption `$18.455040` and
+/// net `$15.317683`, reproducing the spec's illustrative `$18.45` / `$15.31`
+/// and landing inside the `$15-22` target band. The `examples/calibrate.rs`
+/// sweep shows the adjacent candidates fall outside the band (`$1.53` at 100,
+/// `$153.18` at 10_000).
+///
+/// Final production calibration is confirmed by pre-launch stress testing
+/// across all client types and commodities (Spec Open Decision #12); this
+/// default is the stress-test starting point.
 pub fn default_config() -> PayoutConfig {
     PayoutConfig {
         base_coefficient_scaled: 1_000,
-        price_coefficient_scaled: 10,
+        price_coefficient_scaled: 1_000,
         house_edge_bps: 1_700,
     }
 }
@@ -149,7 +162,7 @@ mod tests {
             &Commodity::Gold,
             &default_config(),
         );
-        assert!(redemption > 0);
+        assert_eq!(redemption, 18_455_040);
     }
 
     #[test]
@@ -177,7 +190,25 @@ mod tests {
             &default_config(),
         );
         assert_eq!(result.gross_prm, 1_800_000_000);
+        assert_eq!(result.redemption_usd_scaled, 18_455_040);
+        assert_eq!(result.net_usdc_scaled, 15_317_683);
         assert_eq!(result.house_edge_bps, 1_700);
         assert!(result.net_usdc_scaled < result.redemption_usd_scaled);
+    }
+
+    #[test]
+    fn test_gold_8h_in_target_range() {
+        let result = calculate_payout(
+            2500,
+            28800,
+            320_400_000_000,
+            &Commodity::Gold,
+            &default_config(),
+        );
+        assert!(
+            (15_000_000..=22_000_000).contains(&result.net_usdc_scaled),
+            "net {} outside the $15-22 target band",
+            result.net_usdc_scaled
+        );
     }
 }
