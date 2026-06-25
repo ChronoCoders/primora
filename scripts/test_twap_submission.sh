@@ -40,11 +40,14 @@ cast call $ORACLE_ADDR "getPriceUnchecked(uint8)(uint256,uint256,bool)" 0 --rpc-
 
 echo "=== 6. Test divergence guard: submit a >2% jump, expect revert ==="
 # 350000000000 is ~9% above 320400000000 -- should revert
-set +e
-cast send $ORACLE_ADDR "submitPrice(uint8,uint256)" 0 350000000000 \
-  --private-key $DEPLOYER_KEY \
-  --rpc-url $RPC 2>&1 | grep -i "revert\|PriceDiverged" && echo "DIVERGENCE GUARD WORKS" || echo "WARNING: divergence not caught"
-set -e
+OUT=$(cast send "$ORACLE_ADDR" "submitPrice(uint8,uint256)" 0 350000000000 \
+  --private-key "$DEPLOYER_KEY" --rpc-url "$RPC" 2>&1 || true)
+if grep -qi "revert\|PriceDiverged" <<<"$OUT"; then
+  echo "DIVERGENCE GUARD WORKS"
+else
+  echo "WARNING: divergence not caught"
+  echo "$OUT"
+fi
 
 echo "=== 7. Submit within 2%, expect success ==="
 # 322000000000 is ~0.5% above -- should succeed
