@@ -92,6 +92,45 @@ forge build
 forge test
 ```
 
+## Configuration
+
+The verification service reads all configuration from the environment. Copy
+[`.env.example`](.env.example) to `.env` and fill in real values; `.env` is
+gitignored and must never be committed.
+
+| Variable | Required | Purpose |
+|---|---|---|
+| `DATABASE_URL` | yes | PostgreSQL connection string |
+| `REDIS_URL` | yes | Redis connection string |
+| `BIND_ADDR` | yes | Address/port the HTTP server binds to |
+| `CHAIN_ID` | yes | Ethereum chain id |
+| `RPC_URL` | yes | Ethereum JSON-RPC endpoint |
+| `SIGNING_KEY_HEX` | yes | Mint-proposal signing key (see below) |
+| `LOG_LEVEL` | no | Tracing level (default `info`) |
+| `ORACLE_AGGREGATOR_ADDRESS` | no | Deployed OracleAggregator address (enables on-chain TWAP submission) |
+| `ORACLE_SUBMITTER_KEY_HEX` | no | Oracle submitter key (see below) |
+| `NODE_ENDPOINTS` | no | Comma-separated gRPC node endpoints |
+| `NODE_API_KEY` | no | API key for node gRPC auth |
+
+### Key separation
+
+The service uses two distinct private keys with deliberately different
+authority. They must never be the same key.
+
+- **`SIGNING_KEY_HEX`** — signs mint proposals only. The signature is verified
+  off-chain by the admin multi-sig panel. This key **never submits transactions**
+  and holds **no on-chain mint authority**. In production it should live in an
+  HSM or Vault transit engine, not a plain env var.
+- **`ORACLE_SUBMITTER_KEY_HEX`** (optional) — a low-privilege key used **only**
+  to call `OracleAggregator.submitPrice`. It must be registered as the
+  `authorizedSubmitter` on the deployed OracleAggregator and hold just enough ETH
+  for gas. It is **never** the minting or admin key. If unset (or if
+  `ORACLE_AGGREGATOR_ADDRESS` is unset), the TWAP is computed off-chain but not
+  submitted on-chain.
+
+Minting authority itself lives on-chain behind the MiningContract's 3-of-5
+multi-sig and 48-hour timelock — neither backend key can mint.
+
 ## Local stack
 
 Bring up Postgres, Redis, Prometheus, Grafana, and the verification service:
