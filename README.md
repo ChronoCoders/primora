@@ -132,4 +132,6 @@ execution path, and backend-to-contract integration wiring.
 
 ## License
 
-MIT
+Business Source License 1.1 (BUSL-1.1). Non-production use is permitted; see
+[`LICENSE`](LICENSE) for terms. The Licensed Work converts to Apache-2.0 on the
+Change Date (2030-06-24). Licensor: Chronocoders.
