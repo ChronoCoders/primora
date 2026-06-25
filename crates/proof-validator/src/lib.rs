@@ -57,7 +57,14 @@ impl ProofValidator for PreFilterValidator {
 }
 
 /// Stateless validator for [`ValidationMode::Full`]: runs the PreFilter checks
-/// then the node-side signature check. RandomX verification is Phase 2.
+/// then the node-side signature-presence check. This is the pre-attestation
+/// structural gate only.
+///
+/// Actual RandomX proof-of-work verification is not performed here: it requires
+/// a RandomX VM (a heavy FFI dependency) and runs on the node that holds the
+/// VM. See `node-server`'s `request_attestation`, which recomputes the RandomX
+/// hash of each proof and checks it against the difficulty target before
+/// signing an attestation.
 pub struct FullValidator;
 
 impl ProofValidator for FullValidator {
@@ -71,7 +78,8 @@ impl ProofValidator for FullValidator {
         if pre != ValidationResult::Valid {
             return pre;
         }
-        // TODO(phase2): RandomX verify
+        // RandomX verification lives in node-server's request_attestation; this
+        // validator is the structural pre-attestation check only.
         if proof.signature.is_none() {
             return ValidationResult::Invalid(InvalidReason::InvalidSignature);
         }

@@ -43,7 +43,13 @@ async fn main() {
         }
     };
 
-    let server = node_server::build_server(api_key);
+    let server = match node_server::build_server(api_key) {
+        Ok(server) => server,
+        Err(e) => {
+            tracing::error!(error = %e, "startup failed: randomx verifier init");
+            std::process::exit(1);
+        }
+    };
     tracing::info!(addr = %bind_addr, node_id = %node_id, "primora node starting");
     if let Err(e) = tonic::transport::Server::builder()
         .add_service(server)

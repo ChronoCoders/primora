@@ -1,0 +1,9 @@
+[package]
+name = "randomx-verifier"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+randomx-rs = { workspace = true }
+tracing = { workspace = true }
+alloy-primitives = { workspace = true }
