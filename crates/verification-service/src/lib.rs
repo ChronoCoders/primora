@@ -438,13 +438,107 @@ async fn submit_proof(
     }))
 }
 
-/// Computes the combined cross-chain staking boost for `wallet` (Decision 4d).
+/// A wallet's active stake on one chain, for the staking summary response.
+#[derive(Debug, Serialize)]
+pub struct ChainStake {
+    /// Chain this stake is on.
+    pub chain: Chain,
+    /// Staked PRM in wei (18 decimals) as a decimal string; never rounded here.
+    pub amount: String,
+    /// Stored lock-period ordinal (0/1/2 = 30/90/180 days). On Polygon the lock
+    /// never affects the multiplier (always 1.0x per Decision 4d); the stored
+    /// value is reported only for transparency.
+    pub lock_period: u8,
+    /// Whether the stake is currently active.
+    pub active: bool,
+}
+
+/// A wallet's cross-chain staking summary: each configured chain's stake plus
+/// the combined effective boost, computed by the single shared 4d path.
+#[derive(Debug, Serialize)]
+pub struct StakingSummary {
+    /// Per-chain stakes, one entry per configured chain, in Ethereum-then-Polygon
+    /// order. Empty when no staking readers are configured.
+    pub chains: Vec<ChainStake>,
+    /// Sum of active stake amounts in wei, as a decimal string.
+    pub total_staked: String,
+    /// Combined effective boost in basis points, already capped at
+    /// `payout_calculator::MAX_BOOST_BPS`.
+    pub effective_boost_bps: u32,
+}
+
+/// Records a chain's read result into `chains` (when the chain is configured) and
+/// returns the active stake as `(amount, lock_period)` for boost computation, or
+/// `None` when the chain is unconfigured, inactive, or its read failed.
 ///
-/// Reads the configured chains' StakingContracts concurrently, treats an
-/// inactive stake or any read error as no stake on that chain (degrades to no
-/// boost, never blocks the proposal), and returns the boost in basis points.
-/// Returns 0 when no staking readers are configured.
-async fn compute_staking_boost(state: &AppState, wallet: Address) -> u32 {
+/// A read error degrades the chain to a zero/inactive entry (warn and continue)
+/// so one RPC hiccup never fails the whole summary.
+fn resolve_chain_stake(
+    chain: Chain,
+    result: Option<Result<onchain_client::StakeInfo, onchain_client::OnchainClientError>>,
+    chains: &mut Vec<ChainStake>,
+) -> Option<(u128, u8)> {
+    match result {
+        None => None,
+        Some(Ok(stake)) => {
+            let active = stake.active;
+            chains.push(ChainStake {
+                chain,
+                amount: stake.amount.to_string(),
+                lock_period: stake.lock_period,
+                active,
+            });
+            if active {
+                Some((stake.amount, stake.lock_period))
+            } else {
+                None
+            }
+        }
+        Some(Err(e)) => {
+            tracing::warn!(error = %e, chain = %chain, "staking read failed, treating as no stake");
+            chains.push(ChainStake {
+                chain,
+                amount: "0".to_string(),
+                lock_period: 0,
+                active: false,
+            });
+            None
+        }
+    }
+}
+
+/// Assembles a [`StakingSummary`] from per-chain read results. The single place
+/// that turns stakes into the combined boost via
+/// [`payout_calculator::combined_boost_bps`]: both `end_session` and the staking
+/// endpoint funnel through here, so the boost formula has exactly one caller.
+fn build_summary(
+    ethereum_result: Option<Result<onchain_client::StakeInfo, onchain_client::OnchainClientError>>,
+    polygon_result: Option<Result<onchain_client::StakeInfo, onchain_client::OnchainClientError>>,
+) -> StakingSummary {
+    let mut chains: Vec<ChainStake> = Vec::new();
+    let ethereum_stake = resolve_chain_stake(Chain::Ethereum, ethereum_result, &mut chains);
+    let polygon_stake = resolve_chain_stake(Chain::Polygon, polygon_result, &mut chains);
+
+    let polygon_amount = polygon_stake.map(|(amount, _)| amount);
+    let effective_boost_bps =
+        payout_calculator::combined_boost_bps(ethereum_stake, polygon_amount);
+
+    let total = ethereum_stake
+        .map(|(amount, _)| amount)
+        .unwrap_or(0)
+        .saturating_add(polygon_amount.unwrap_or(0));
+
+    StakingSummary {
+        chains,
+        total_staked: total.to_string(),
+        effective_boost_bps,
+    }
+}
+
+/// Reads a wallet's stake on every configured chain concurrently and assembles
+/// the cross-chain [`StakingSummary`] via [`build_summary`]. Returns an empty
+/// `chains` list and a zero boost when no staking readers are configured.
+async fn staking_summary(state: &AppState, wallet: Address) -> StakingSummary {
     let ethereum_reader = state
         .staking_readers
         .iter()
@@ -471,24 +565,7 @@ async fn compute_staking_boost(state: &AppState, wallet: Address) -> u32 {
         },
     );
 
-    let ethereum_stake = match ethereum_result {
-        Some(Ok(stake)) if stake.active => Some((stake.amount, stake.lock_period)),
-        Some(Ok(_)) | None => None,
-        Some(Err(e)) => {
-            tracing::warn!(error = %e, chain = "ethereum", "staking read failed, treating as no stake");
-            None
-        }
-    };
-    let polygon_stake = match polygon_result {
-        Some(Ok(stake)) if stake.active => Some(stake.amount),
-        Some(Ok(_)) | None => None,
-        Some(Err(e)) => {
-            tracing::warn!(error = %e, chain = "polygon", "staking read failed, treating as no stake");
-            None
-        }
-    };
-
-    payout_calculator::combined_boost_bps(ethereum_stake, polygon_stake)
+    build_summary(ethereum_result, polygon_result)
 }
 
 /// Ends a session: verifies the commit-reveal nonce, finalizes the session TWAP,
@@ -633,7 +710,7 @@ async fn end_session(
                 &payout_config,
                 &ctx.commodity,
             );
-            let boost_bps = compute_staking_boost(&state, ctx.wallet).await;
+            let boost_bps = staking_summary(&state, ctx.wallet).await.effective_boost_bps;
             let boosted_gross = payout_calculator::apply_staking_boost(base_gross, boost_bps);
             if boost_bps > 0 {
                 tracing::info!(
@@ -764,6 +841,19 @@ async fn wallet_sessions(
     Ok(Json(rows))
 }
 
+/// Returns a wallet's cross-chain staking summary: each configured chain's stake
+/// plus the combined effective boost (Decision 4d), computed by the same path
+/// `end_session` uses. A chain whose RPC read fails degrades to a zero/inactive
+/// entry rather than failing the request. With no staking readers configured,
+/// returns an empty `chains` list and a zero boost (not an error).
+async fn wallet_staking(
+    State(state): State<AppState>,
+    Path(wallet): Path<String>,
+) -> Result<Json<StakingSummary>, ApiError> {
+    let address = parse_wallet(&wallet)?;
+    Ok(Json(staking_summary(&state, address).await))
+}
+
 /// Exposes the Prometheus metrics registry in text exposition format.
 pub async fn metrics_handler() -> (StatusCode, String) {
     (StatusCode::OK, metrics::metrics_handler())
@@ -789,6 +879,7 @@ pub fn router(state: AppState) -> Router {
         .route("/wallets/:wallet/payouts", get(wallet_payouts))
         .route("/wallets/:wallet/earnings", get(wallet_earnings))
         .route("/wallets/:wallet/sessions", get(wallet_sessions))
+        .route("/wallets/:wallet/staking", get(wallet_staking))
         .route("/health", get(health_check))
         .route("/metrics", get(metrics_handler))
         .layer(TraceLayer::new_for_http())
@@ -893,5 +984,53 @@ mod tests {
             }),
             Err(ApiError::RateLimited)
         ));
+    }
+
+    const E18: u128 = 1_000_000_000_000_000_000;
+
+    fn stake(amount: u128, lock_period: u8, active: bool) -> onchain_client::StakeInfo {
+        onchain_client::StakeInfo {
+            amount,
+            lock_period,
+            active,
+        }
+    }
+
+    #[test]
+    fn test_build_summary_no_readers() {
+        let summary = build_summary(None, None);
+        assert!(summary.chains.is_empty());
+        assert_eq!(summary.total_staked, "0");
+        assert_eq!(summary.effective_boost_bps, 0);
+    }
+
+    #[test]
+    fn test_build_summary_combined_cross_chain() {
+        let summary = build_summary(
+            Some(Ok(stake(30_000 * E18, 1, true))),
+            Some(Ok(stake(30_000 * E18, 0, true))),
+        );
+        assert_eq!(summary.chains.len(), 2);
+        assert_eq!(summary.chains[0].chain, Chain::Ethereum);
+        assert_eq!(summary.chains[1].chain, Chain::Polygon);
+        assert_eq!(summary.total_staked, (60_000 * E18).to_string());
+        assert_eq!(summary.effective_boost_bps, 1300);
+    }
+
+    #[test]
+    fn test_build_summary_inactive_excluded_from_boost() {
+        let summary = build_summary(Some(Ok(stake(500_000 * E18, 2, false))), None);
+        assert_eq!(summary.chains.len(), 1);
+        assert!(!summary.chains[0].active);
+        assert_eq!(summary.chains[0].amount, (500_000 * E18).to_string());
+        assert_eq!(summary.total_staked, "0");
+        assert_eq!(summary.effective_boost_bps, 0);
+    }
+
+    #[test]
+    fn test_build_summary_max_boost_cap() {
+        let summary = build_summary(Some(Ok(stake(500_000 * E18, 2, true))), None);
+        assert_eq!(summary.chains.len(), 1);
+        assert_eq!(summary.effective_boost_bps, 4000);
     }
 }
