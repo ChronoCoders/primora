@@ -26,12 +26,10 @@ use proto::node_service_server::{NodeService, NodeServiceServer};
 const API_KEY_HEADER: &str = "x-api-key";
 const DEFAULT_NODE_ID: &str = "node-unknown";
 
-/// RandomX seed (cache key) for the verifier. For Phase 2 this is a fixed
-/// value shared by all nodes. In production the seed rotates per epoch so that
-/// proofs are bound to an epoch and cannot be precomputed far ahead. Clients
-/// must hash their proof input under this same key for verification to succeed.
-// TODO(phase3-epoch-seed): derive the seed from the active mining epoch.
-pub const RANDOMX_SEED: &[u8] = b"primora-phase2-randomx-seed";
+/// RandomX seed (cache key) for the verifier, re-exported from the single
+/// source of truth in `randomx-verifier`. Clients must hash their proof input
+/// under this same key for verification to succeed.
+pub use randomx_verifier::PHASE2_SEED as RANDOMX_SEED;
 
 /// A RandomX verification request sent to the dedicated verifier thread.
 struct VerifyJob {

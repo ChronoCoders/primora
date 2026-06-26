@@ -13,6 +13,12 @@ use std::fmt;
 use alloy_primitives::U256;
 use randomx_rs::{RandomXCache, RandomXFlag, RandomXVM};
 
+/// The RandomX seed used for proof verification in Phase 2. In production this
+/// rotates per epoch (see TODO phase3-epoch-seed). This is the single source of
+/// truth for the seed; the node server and proof-generation helper both use it
+/// so a client's proof and the node's verification agree.
+pub const PHASE2_SEED: &[u8] = b"primora-phase2-randomx-seed";
+
 /// Error raised while initializing or running a [`RandomXVerifier`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RandomXError {
@@ -114,6 +120,11 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_phase2_seed_bytes_locked() {
+        assert_eq!(PHASE2_SEED, b"primora-phase2-randomx-seed");
+    }
+
+    #[test]
     fn test_difficulty_target() {
         // This mirrors the difficulty arithmetic inside `verify`: a hash of all
         // 0xFF bytes is the largest possible value and fails difficulty 2,
@@ -152,5 +163,17 @@ mod tests {
         let mut wrong = expected;
         wrong[0] ^= 0xFF;
         assert!(!verifier.verify(input, &wrong, 1).unwrap());
+    }
+
+    // Heavy: see `test_verifier_creates`. Confirms two independent verifiers
+    // built from PHASE2_SEED hash the same input identically, so a client's
+    // generated proof matches the node's verification.
+    #[test]
+    #[ignore = "RandomX light VM init is slow; run with --ignored"]
+    fn test_phase2_seed_deterministic_across_instances() {
+        let input = b"primora-proof-001";
+        let mut a = RandomXVerifier::new(PHASE2_SEED).unwrap();
+        let mut b = RandomXVerifier::new(PHASE2_SEED).unwrap();
+        assert_eq!(a.hash(input).unwrap(), b.hash(input).unwrap());
     }
 }
