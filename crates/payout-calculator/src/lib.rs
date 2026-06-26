@@ -111,6 +111,71 @@ pub fn apply_staking_boost(gross_prm: u128, boost_bps: u32) -> u128 {
     gross_prm * (BPS_DENOMINATOR + boost_bps as u128) / BPS_DENOMINATOR
 }
 
+/// One PRM token in wei (18 decimals), used for the staking tier thresholds.
+const PRM: u128 = 1_000_000_000_000_000_000;
+/// Hard cap on the effective staking boost (40%), mirroring StakingContract.sol.
+pub const MAX_BOOST_BPS: u32 = 4_000;
+/// Lock-multiplier scale factor (a multiplier of `130` means 1.3x).
+const LOCK_MULT_SCALE: u32 = 100;
+
+/// Returns the base staking boost in basis points for a total staked amount,
+/// matching the deployed `StakingContract.baseBoostBps` tier table (Spec 6.4).
+/// `total_staked` is in PRM wei (18 decimals).
+pub fn base_boost_bps(total_staked: u128) -> u32 {
+    if total_staked >= 500_000 * PRM {
+        2_500
+    } else if total_staked >= 100_000 * PRM {
+        1_800
+    } else if total_staked >= 50_000 * PRM {
+        1_000
+    } else if total_staked >= 10_000 * PRM {
+        500
+    } else {
+        0
+    }
+}
+
+/// Returns the lock multiplier scaled by 100 for an enum ordinal lock period
+/// (0=30d, 1=90d, 2=180d), matching `StakingContract.lockMultiplier` (Spec 6.5).
+/// Any other ordinal defaults to 1.0x.
+pub fn lock_multiplier_scaled(lock_period: u8) -> u32 {
+    match lock_period {
+        0 => 100,
+        1 => 130,
+        2 => 160,
+        _ => 100,
+    }
+}
+
+/// Computes the combined cross-chain effective staking boost in basis points
+/// (Spec Section 6.4/6.5).
+///
+/// `ethereum_stake` is `Some((amount, lock_period))` for an active Ethereum
+/// stake; `polygon_stake` is `Some(amount)` for an active Polygon stake. Amounts
+/// are PRM wei (18 decimals). Steps:
+/// 1. `total` = Ethereum amount + Polygon amount (tier driven by the combined
+///    cross-chain total).
+/// 2. `base` = [`base_boost_bps`]`(total)`.
+/// 3. `lock_mult` = the Ethereum lock multiplier if there is an active Ethereum
+///    stake, otherwise 1.0x. Polygon never contributes a lock multiplier (its
+///    stored lock period is intentionally ignored; Polygon is always 1.0x).
+/// 4. `effective = base * lock_mult / 100`, capped at [`MAX_BOOST_BPS`].
+pub fn combined_boost_bps(
+    ethereum_stake: Option<(u128, u8)>,
+    polygon_stake: Option<u128>,
+) -> u32 {
+    let ethereum_amount = ethereum_stake.map(|(amount, _)| amount).unwrap_or(0);
+    let polygon_amount = polygon_stake.unwrap_or(0);
+    let total = ethereum_amount.saturating_add(polygon_amount);
+    let base = base_boost_bps(total);
+    let lock_mult = match ethereum_stake {
+        Some((_, lock_period)) => lock_multiplier_scaled(lock_period),
+        None => LOCK_MULT_SCALE,
+    };
+    let effective = base * lock_mult / LOCK_MULT_SCALE;
+    effective.min(MAX_BOOST_BPS)
+}
+
 /// Full payout breakdown for a session.
 #[derive(Debug, Clone)]
 pub struct PayoutResult {
@@ -210,5 +275,59 @@ mod tests {
             "net {} outside the $15-22 target band",
             result.net_usdc_scaled
         );
+    }
+
+    const E18: u128 = 1_000_000_000_000_000_000;
+
+    #[test]
+    fn test_base_boost_tiers() {
+        assert_eq!(base_boost_bps(9_999 * E18), 0);
+        assert_eq!(base_boost_bps(10_000 * E18), 500);
+        assert_eq!(base_boost_bps(50_000 * E18), 1_000);
+        assert_eq!(base_boost_bps(100_000 * E18), 1_800);
+        assert_eq!(base_boost_bps(500_000 * E18), 2_500);
+    }
+
+    #[test]
+    fn test_lock_multiplier() {
+        assert_eq!(lock_multiplier_scaled(0), 100);
+        assert_eq!(lock_multiplier_scaled(1), 130);
+        assert_eq!(lock_multiplier_scaled(2), 160);
+        assert_eq!(lock_multiplier_scaled(7), 100);
+    }
+
+    #[test]
+    fn test_boost_polygon_only_10k() {
+        assert_eq!(combined_boost_bps(None, Some(10_000 * E18)), 500);
+    }
+
+    #[test]
+    fn test_boost_combined_60k_eth90d() {
+        assert_eq!(
+            combined_boost_bps(Some((30_000 * E18, 1)), Some(30_000 * E18)),
+            1_300
+        );
+    }
+
+    #[test]
+    fn test_boost_eth_100k_180d() {
+        assert_eq!(combined_boost_bps(Some((100_000 * E18, 2)), None), 2_880);
+    }
+
+    #[test]
+    fn test_boost_eth_500k_180d_caps() {
+        assert_eq!(combined_boost_bps(Some((500_000 * E18, 2)), None), 4_000);
+    }
+
+    #[test]
+    fn test_boost_below_min() {
+        assert_eq!(combined_boost_bps(None, Some(5_000 * E18)), 0);
+    }
+
+    #[test]
+    fn test_apply_staking_boost_integration() {
+        let boost = combined_boost_bps(Some((30_000 * E18, 1)), Some(30_000 * E18));
+        assert_eq!(boost, 1_300);
+        assert_eq!(apply_staking_boost(18_000, boost), 20_340);
     }
 }

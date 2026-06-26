@@ -46,6 +46,20 @@ mod mining_abi {
 
 use mining_abi::IMiningContract;
 
+#[allow(missing_docs, dead_code, non_snake_case, clippy::all)]
+mod staking_abi {
+    use alloy::sol;
+
+    sol! {
+        #[sol(rpc)]
+        interface IStakingContract {
+            function stakes(address user) external view returns (uint256 amount, uint8 lockPeriod, uint256 stakedAt, uint256 unlockAt, bool active);
+        }
+    }
+}
+
+use staking_abi::IStakingContract;
+
 /// Errors returned by the on-chain client.
 #[derive(Debug)]
 pub enum OnchainClientError {
@@ -367,6 +381,61 @@ impl MiningWriter {
             approvals: ret.approvals,
             executed: ret.executed,
             cancelled: ret.cancelled,
+        })
+    }
+}
+
+/// A wallet's active stake on one chain's StakingContract.
+#[derive(Debug, Clone)]
+pub struct StakeInfo {
+    /// PRM staked, in wei (18 decimals). Assumed to fit in `u128`.
+    pub amount: u128,
+    /// Lock-period enum ordinal: 0 = 30d, 1 = 90d, 2 = 180d.
+    pub lock_period: u8,
+    /// Whether the stake is currently active. When false, the caller treats the
+    /// stake as zero for boost purposes.
+    pub active: bool,
+}
+
+/// Read-only client for a single chain's StakingContract. The combined
+/// cross-chain boost is computed off-chain by the caller (Decision 4d); this
+/// reader only exposes one chain's raw stake.
+pub struct StakingReader {
+    provider: DynProvider,
+    staking_address: Address,
+}
+
+impl StakingReader {
+    /// Builds a read-only HTTP client bound to the StakingContract at
+    /// `staking_address`.
+    pub async fn new(
+        rpc_url: &str,
+        staking_address: Address,
+    ) -> Result<Self, OnchainClientError> {
+        let url = rpc_url
+            .parse()
+            .map_err(|_| OnchainClientError::InvalidUrl(rpc_url.to_string()))?;
+        let provider = ProviderBuilder::new().connect_http(url).erased();
+        Ok(Self {
+            provider,
+            staking_address,
+        })
+    }
+
+    /// Reads `wallet`'s stake from the StakingContract `stakes` mapping. An
+    /// inactive stake is returned as-is with `active = false`.
+    pub async fn read_stake(&self, wallet: Address) -> Result<StakeInfo, OnchainClientError> {
+        let contract = IStakingContract::new(self.staking_address, &self.provider);
+        let ret = contract
+            .stakes(wallet)
+            .call()
+            .await
+            .map_err(|e| OnchainClientError::Contract(e.to_string()))?;
+        Ok(StakeInfo {
+            amount: u128::try_from(ret.amount)
+                .map_err(|_| OnchainClientError::Contract("stake amount overflows u128".into()))?,
+            lock_period: ret.lockPeriod,
+            active: ret.active,
         })
     }
 }
