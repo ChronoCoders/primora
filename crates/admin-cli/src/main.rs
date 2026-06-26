@@ -6,13 +6,18 @@
 //! Output convention: user-facing command results (the proposal table, tx
 //! hashes, status fields) are printed with `println!` because that IS this
 //! program's output. Internal/diagnostic logging uses `tracing`.
+//!
+//! Dual-chain routing (Decision 4c): each MiningContract is deployed per chain.
+//! `propose` auto-routes from the chain stored on the Postgres proposal row;
+//! `approve`/`status`/`execute`/`cancel` take an explicit `--chain` because a
+//! proposal id alone does not encode which chain it lives on.
 
 use std::str::FromStr;
 
 use alloy::primitives::{hex, keccak256, Address};
 use alloy::signers::local::PrivateKeySigner;
 use clap::{Parser, Subcommand};
-use common::{ProposalStatus, SessionId};
+use common::{Chain, ProposalStatus, SessionId};
 use onchain_client::MiningWriter;
 use postgres_store::PostgresStore;
 
@@ -26,14 +31,23 @@ struct Cli {
     #[arg(long, env = "DATABASE_URL", global = true)]
     database_url: Option<String>,
     /// Ethereum JSON-RPC endpoint.
-    #[arg(long, env = "RPC_URL", global = true)]
-    rpc_url: Option<String>,
-    /// Deployed MiningContract address.
-    #[arg(long, env = "MINING_CONTRACT_ADDRESS", global = true)]
-    mining_address: Option<String>,
-    /// Owner/proposer key (hex, with or without 0x).
-    #[arg(long, env = "ADMIN_KEY_HEX", global = true)]
-    admin_key: Option<String>,
+    #[arg(long, env = "ETHEREUM_RPC_URL", global = true)]
+    ethereum_rpc_url: Option<String>,
+    /// Ethereum MiningContract address.
+    #[arg(long, env = "ETHEREUM_MINING_CONTRACT_ADDRESS", global = true)]
+    ethereum_mining_address: Option<String>,
+    /// Ethereum owner/proposer key (hex, with or without 0x).
+    #[arg(long, env = "ETHEREUM_ADMIN_KEY_HEX", global = true)]
+    ethereum_admin_key: Option<String>,
+    /// Polygon JSON-RPC endpoint.
+    #[arg(long, env = "POLYGON_RPC_URL", global = true)]
+    polygon_rpc_url: Option<String>,
+    /// Polygon MiningContract address.
+    #[arg(long, env = "POLYGON_MINING_CONTRACT_ADDRESS", global = true)]
+    polygon_mining_address: Option<String>,
+    /// Polygon owner/proposer key (hex, with or without 0x).
+    #[arg(long, env = "POLYGON_ADMIN_KEY_HEX", global = true)]
+    polygon_admin_key: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -43,38 +57,51 @@ struct Cli {
 enum Command {
     /// List pending proposals from Postgres (read-only).
     List,
-    /// Propose a mint for a pending session.
+    /// Propose a mint for a pending session. Auto-routes to the chain recorded
+    /// on the Postgres proposal row.
     Propose {
         /// Source session identifier.
         #[arg(long)]
         session_id: String,
     },
-    /// Approve a pending on-chain proposal.
+    /// Approve a pending on-chain proposal on the given chain.
     Approve {
         /// Proposal id (32-byte hex).
         #[arg(long)]
         proposal_id: String,
+        /// Target chain: `ethereum` or `polygon`.
+        #[arg(long)]
+        chain: String,
     },
-    /// Show on-chain proposal state and timelock remaining.
+    /// Show on-chain proposal state and timelock remaining on the given chain.
     Status {
         /// Proposal id (32-byte hex).
         #[arg(long)]
         proposal_id: String,
+        /// Target chain: `ethereum` or `polygon`.
+        #[arg(long)]
+        chain: String,
     },
-    /// Execute a fully-approved proposal after its timelock.
+    /// Execute a fully-approved proposal after its timelock on the given chain.
     Execute {
         /// Proposal id (32-byte hex).
         #[arg(long)]
         proposal_id: String,
+        /// Target chain: `ethereum` or `polygon`.
+        #[arg(long)]
+        chain: String,
         /// Source session id, to mark the Postgres row Confirmed.
         #[arg(long)]
         session_id: Option<String>,
     },
-    /// Cancel a pending proposal.
+    /// Cancel a pending proposal on the given chain.
     Cancel {
         /// Proposal id (32-byte hex).
         #[arg(long)]
         proposal_id: String,
+        /// Target chain: `ethereum` or `polygon`.
+        #[arg(long)]
+        chain: String,
         /// Source session id, to mark the Postgres row Rejected.
         #[arg(long)]
         session_id: Option<String>,
@@ -95,16 +122,42 @@ fn derive_proposal_id(session_id: &str) -> [u8; 32] {
     keccak256(session_id.as_bytes()).0
 }
 
+/// Parses a chain identifier (`ethereum` or `polygon`).
+fn parse_chain(raw: &str) -> Result<Chain, String> {
+    Chain::from_str_id(raw).ok_or_else(|| format!("invalid chain '{raw}' (expected ethereum or polygon)"))
+}
+
 /// Returns `value` or a descriptive error naming the flag and env var.
 fn require(value: Option<String>, flag: &str, env: &str) -> Result<String, String> {
     value.ok_or_else(|| format!("missing {flag} (or env {env})"))
 }
 
-/// Builds a signer-backed MiningContract writer from the global options.
-async fn build_writer(cli: &Cli) -> Result<MiningWriter, String> {
-    let rpc = require(cli.rpc_url.clone(), "--rpc-url", "RPC_URL")?;
-    let mining = require(cli.mining_address.clone(), "--mining-address", "MINING_CONTRACT_ADDRESS")?;
-    let key = require(cli.admin_key.clone(), "--admin-key", "ADMIN_KEY_HEX")?;
+/// Builds a signer-backed MiningContract writer for `chain` from that chain's
+/// configured RPC, MiningContract address, and admin key. Errors clearly when
+/// the chain is not configured.
+async fn build_writer_for_chain(cli: &Cli, chain: Chain) -> Result<MiningWriter, String> {
+    let (rpc, mining, key, prefix) = match chain {
+        Chain::Ethereum => (
+            cli.ethereum_rpc_url.clone(),
+            cli.ethereum_mining_address.clone(),
+            cli.ethereum_admin_key.clone(),
+            "ETHEREUM",
+        ),
+        Chain::Polygon => (
+            cli.polygon_rpc_url.clone(),
+            cli.polygon_mining_address.clone(),
+            cli.polygon_admin_key.clone(),
+            "POLYGON",
+        ),
+    };
+    let (rpc, mining, key) = match (rpc, mining, key) {
+        (Some(rpc), Some(mining), Some(key)) => (rpc, mining, key),
+        _ => {
+            return Err(format!(
+                "chain {chain} not configured (set {prefix}_RPC_URL, {prefix}_MINING_CONTRACT_ADDRESS, {prefix}_ADMIN_KEY_HEX)"
+            ))
+        }
+    };
     let address = Address::from_str(&mining).map_err(|e| format!("invalid mining address: {e}"))?;
     let signer = PrivateKeySigner::from_str(&key).map_err(|e| format!("invalid admin key: {e}"))?;
     MiningWriter::new(&rpc, signer, address)
@@ -132,17 +185,18 @@ async fn run(cli: Cli) -> Result<(), String> {
             let store = build_store(&cli).await?;
             let rows = store.get_pending_proposals().await.map_err(|e| e.to_string())?;
             println!(
-                "{:<38} {:<44} {:<26} {:<10} {:<10} {}",
-                "session_id", "wallet", "gross_prm", "commodity", "status", "proposal_id"
+                "{:<38} {:<44} {:<26} {:<10} {:<9} {:<10} {}",
+                "session_id", "wallet", "gross_prm", "commodity", "chain", "status", "proposal_id"
             );
             for row in &rows {
                 let pid = derive_proposal_id(&row.session_id);
                 println!(
-                    "{:<38} {:<44} {:<26} {:<10} {:<10} 0x{}",
+                    "{:<38} {:<44} {:<26} {:<10} {:<9} {:<10} 0x{}",
                     row.session_id,
                     row.wallet,
                     row.gross_prm,
                     row.commodity,
+                    row.chain,
                     row.status,
                     hex::encode(pid)
                 );
@@ -156,6 +210,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 .into_iter()
                 .find(|r| &r.session_id == session_id)
                 .ok_or_else(|| format!("no pending proposal for session {session_id}"))?;
+            let chain = parse_chain(&row.chain)?;
             let recipient =
                 Address::from_str(&row.wallet).map_err(|e| format!("bad wallet in db: {e}"))?;
             let amount: u128 = row
@@ -163,7 +218,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 .parse()
                 .map_err(|_| format!("bad gross_prm in db: {}", row.gross_prm))?;
             let proposal_id = derive_proposal_id(session_id);
-            let writer = build_writer(&cli).await?;
+            let writer = build_writer_for_chain(&cli, chain).await?;
             let tx = writer
                 .propose_mint(proposal_id, proposal_id, recipient, amount)
                 .await
@@ -173,28 +228,33 @@ async fn run(cli: Cli) -> Result<(), String> {
                 .await
                 .map_err(|e| e.to_string())?;
             println!("proposalId: 0x{}", hex::encode(proposal_id));
+            println!("chain:      {chain}");
             println!("recipient:  {recipient}");
             println!("amount:     {amount}");
             println!("tx:         {tx}");
         }
-        Command::Approve { proposal_id } => {
+        Command::Approve { proposal_id, chain } => {
             let id = parse_proposal_id(proposal_id)?;
-            let writer = build_writer(&cli).await?;
+            let chain = parse_chain(chain)?;
+            let writer = build_writer_for_chain(&cli, chain).await?;
             let tx = writer.approve_mint(id).await.map_err(|e| e.to_string())?;
             let proposal = writer.get_proposal(id).await.map_err(|e| e.to_string())?;
+            println!("chain:     {chain}");
             println!("tx:        {tx}");
             println!("approvals: {}", proposal.approvals);
         }
-        Command::Status { proposal_id } => {
+        Command::Status { proposal_id, chain } => {
             let id = parse_proposal_id(proposal_id)?;
-            let writer = build_writer(&cli).await?;
+            let chain = parse_chain(chain)?;
+            let writer = build_writer_for_chain(&cli, chain).await?;
             let proposal = writer.get_proposal(id).await.map_err(|e| e.to_string())?;
             if proposal.proposed_at == 0 {
-                println!("proposal 0x{} not found on-chain", hex::encode(id));
+                println!("proposal 0x{} not found on-chain ({chain})", hex::encode(id));
                 return Ok(());
             }
             let unlock_at = proposal.proposed_at + TIMELOCK_SECS;
             let now = now_secs();
+            println!("chain:       {chain}");
             println!("session_id:  0x{}", hex::encode(proposal.session_id));
             println!("recipient:   {}", proposal.recipient);
             println!("amount:      {}", proposal.amount);
@@ -208,17 +268,21 @@ async fn run(cli: Cli) -> Result<(), String> {
                 println!("timelock:    {} seconds remaining", unlock_at - now);
             }
         }
-        Command::Execute { proposal_id, session_id } => {
+        Command::Execute { proposal_id, chain, session_id } => {
             let id = parse_proposal_id(proposal_id)?;
-            let writer = build_writer(&cli).await?;
+            let chain = parse_chain(chain)?;
+            let writer = build_writer_for_chain(&cli, chain).await?;
             let tx = writer.execute_mint(id).await.map_err(|e| e.to_string())?;
+            println!("chain: {chain}");
             println!("tx: {tx}");
             update_db_status(&cli, session_id.as_deref(), ProposalStatus::Confirmed).await?;
         }
-        Command::Cancel { proposal_id, session_id } => {
+        Command::Cancel { proposal_id, chain, session_id } => {
             let id = parse_proposal_id(proposal_id)?;
-            let writer = build_writer(&cli).await?;
+            let chain = parse_chain(chain)?;
+            let writer = build_writer_for_chain(&cli, chain).await?;
             let tx = writer.cancel_mint(id).await.map_err(|e| e.to_string())?;
+            println!("chain: {chain}");
             println!("tx: {tx}");
             update_db_status(&cli, session_id.as_deref(), ProposalStatus::Rejected).await?;
         }
@@ -292,5 +356,13 @@ mod tests {
         assert_eq!(a, b);
         assert_ne!(a, [0u8; 32]);
         assert_ne!(derive_proposal_id("session-xyz"), derive_proposal_id("other"));
+    }
+
+    #[test]
+    fn test_parse_chain() {
+        assert_eq!(parse_chain("ethereum").unwrap(), Chain::Ethereum);
+        assert_eq!(parse_chain("polygon").unwrap(), Chain::Polygon);
+        assert!(parse_chain("solana").is_err());
+        assert!(parse_chain("Ethereum").is_err());
     }
 }
