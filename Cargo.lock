@@ -2954,6 +2954,7 @@ dependencies = [
 name = "node-server"
 version = "0.1.0"
 dependencies = [
+ "alloy",
  "alloy-primitives",
  "chrono",
  "common",
@@ -2961,7 +2962,6 @@ dependencies = [
  "prost",
  "prost-types",
  "randomx-verifier",
- "sha2",
  "tokio",
  "tonic",
  "tonic-build",

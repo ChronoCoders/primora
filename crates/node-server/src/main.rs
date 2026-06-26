@@ -3,6 +3,9 @@
 //! serves the gRPC `NodeService` until shutdown.
 
 use std::net::SocketAddr;
+use std::str::FromStr;
+
+use alloy::signers::local::PrivateKeySigner;
 
 const DEFAULT_NODE_ID: &str = "node-unknown";
 const DEFAULT_LOG_LEVEL: &str = "info";
@@ -33,6 +36,19 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    let signer = match std::env::var("NODE_SIGNING_KEY_HEX") {
+        Ok(hex) => match PrivateKeySigner::from_str(&hex) {
+            Ok(signer) => signer,
+            Err(e) => {
+                tracing::error!(error = %e, "startup failed: invalid NODE_SIGNING_KEY_HEX");
+                std::process::exit(1);
+            }
+        },
+        Err(_) => {
+            tracing::error!("startup failed: missing required env var NODE_SIGNING_KEY_HEX");
+            std::process::exit(1);
+        }
+    };
     let node_id = std::env::var("NODE_ID").unwrap_or_else(|_| DEFAULT_NODE_ID.to_string());
 
     let addr: SocketAddr = match bind_addr.parse() {
@@ -43,7 +59,7 @@ async fn main() {
         }
     };
 
-    let server = match node_server::build_server(api_key) {
+    let server = match node_server::build_server(api_key, signer) {
         Ok(server) => server,
         Err(e) => {
             tracing::error!(error = %e, "startup failed: randomx verifier init");

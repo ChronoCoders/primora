@@ -3,6 +3,8 @@
 //! Tonic gRPC node server: proof metadata intake, session-end intake, and
 //! attestation signing, authenticated with a shared API key.
 
+use alloy::signers::local::PrivateKeySigner;
+use alloy::signers::SignerSync;
 use alloy_primitives::Address;
 use chrono::Utc;
 use common::{
@@ -10,7 +12,6 @@ use common::{
     ValidationMode, ValidationResult,
 };
 use randomx_verifier::{RandomXError, RandomXVerifier};
-use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, oneshot};
 use tonic::{Request, Response, Status};
 
@@ -83,19 +84,27 @@ fn spawn_verifier(seed: &[u8]) -> Result<mpsc::UnboundedSender<VerifyJob>, Rando
 pub struct NodeServiceImpl {
     /// API key required on every inbound request.
     api_key: String,
+    /// secp256k1 key this node signs attestations with. Its address is the
+    /// node's attestation identity.
+    signer: PrivateKeySigner,
     /// Sender to the dedicated RandomX verifier thread. See [`spawn_verifier`]
     /// for why verification runs on its own thread rather than inline.
     verify_tx: mpsc::UnboundedSender<VerifyJob>,
 }
 
 impl NodeServiceImpl {
-    /// Creates a new `NodeServiceImpl` authenticating against `api_key`.
+    /// Creates a new `NodeServiceImpl` authenticating against `api_key` and
+    /// signing attestations with `signer`.
     ///
     /// Spawns the RandomX verifier thread, initializing it in light mode from
     /// [`RANDOMX_SEED`]; returns an error if the VM cannot be built.
-    pub fn new(api_key: String) -> Result<Self, RandomXError> {
+    pub fn new(api_key: String, signer: PrivateKeySigner) -> Result<Self, RandomXError> {
         let verify_tx = spawn_verifier(RANDOMX_SEED)?;
-        Ok(Self { api_key, verify_tx })
+        Ok(Self {
+            api_key,
+            signer,
+            verify_tx,
+        })
     }
 
     fn authenticate<T>(&self, request: &Request<T>) -> Result<(), Status> {
@@ -244,16 +253,19 @@ impl NodeService for NodeServiceImpl {
             Err(_) => return Err(Status::internal("randomx verifier dropped reply")),
         }
 
-        let mut hasher = Sha256::new();
-        hasher.update(proof_hash);
-        let mut signature_bytes = [0u8; 32];
-        signature_bytes.copy_from_slice(&hasher.finalize());
+        let signature = match self.signer.sign_message_sync(&proof_hash) {
+            Ok(signature) => signature,
+            Err(e) => {
+                tracing::error!(error = %e, "attestation signing failed");
+                return Err(Status::internal("attestation signing failed"));
+            }
+        };
 
         let node_id = std::env::var("NODE_ID").unwrap_or_else(|_| DEFAULT_NODE_ID.to_string());
         let now = Utc::now();
-        let signature = proto::NodeSignature {
+        let node_signature = proto::NodeSignature {
             node_id,
-            signature: signature_bytes.to_vec(),
+            signature: signature.as_bytes().to_vec(),
             signed_at: Some(prost_types::Timestamp {
                 seconds: now.timestamp(),
                 nanos: now.timestamp_subsec_nanos() as i32,
@@ -263,25 +275,35 @@ impl NodeService for NodeServiceImpl {
         Ok(Response::new(proto::AttestationResponse {
             session_id: attestation_request.session_id,
             valid: true,
-            signature: Some(signature),
+            signature: Some(node_signature),
         }))
     }
 }
 
-/// Builds a `NodeServiceServer` ready to register with a Tonic server.
+/// Builds a `NodeServiceServer` ready to register with a Tonic server, signing
+/// attestations with `signer`.
 ///
 /// Returns an error if the RandomX verifier thread cannot be initialized.
-pub fn build_server(api_key: String) -> Result<NodeServiceServer<NodeServiceImpl>, RandomXError> {
-    Ok(NodeServiceServer::new(NodeServiceImpl::new(api_key)?))
+pub fn build_server(
+    api_key: String,
+    signer: PrivateKeySigner,
+) -> Result<NodeServiceServer<NodeServiceImpl>, RandomXError> {
+    Ok(NodeServiceServer::new(NodeServiceImpl::new(api_key, signer)?))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn test_signer() -> PrivateKeySigner {
+        "0x0000000000000000000000000000000000000000000000000000000000000001"
+            .parse()
+            .unwrap()
+    }
+
     #[tokio::test]
     async fn test_node_service_rejects_wrong_api_key() {
-        let service = NodeServiceImpl::new("correct-key".to_string()).unwrap();
+        let service = NodeServiceImpl::new("correct-key".to_string(), test_signer()).unwrap();
         let mut request = Request::new(proto::PartialProofMetadata::default());
         request
             .metadata_mut()
@@ -293,7 +315,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_node_service_accepts_correct_api_key() {
-        let service = NodeServiceImpl::new("correct-key".to_string()).unwrap();
+        let service = NodeServiceImpl::new("correct-key".to_string(), test_signer()).unwrap();
         let mut request = Request::new(proto::PartialProofMetadata::default());
         request
             .metadata_mut()

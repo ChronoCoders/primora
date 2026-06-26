@@ -8,6 +8,8 @@
 //! service's own verifier thread), which is slow, so they are `#[ignore]`d.
 //! Run with `cargo test -p node-server -- --ignored`.
 
+use alloy::signers::local::PrivateKeySigner;
+use alloy_primitives::Signature;
 use node_server::proto::node_service_server::NodeService;
 use node_server::{proto, NodeServiceImpl, RANDOMX_SEED};
 use randomx_verifier::RandomXVerifier;
@@ -15,6 +17,13 @@ use tonic::Request;
 
 const API_KEY: &str = "test-key";
 const WALLET: &str = "0x0000000000000000000000000000000000000000";
+const TEST_SIGNING_KEY: &str =
+    "0x0000000000000000000000000000000000000000000000000000000000000001";
+
+fn test_service() -> NodeServiceImpl {
+    let signer: PrivateKeySigner = TEST_SIGNING_KEY.parse().expect("valid signing key");
+    NodeServiceImpl::new(API_KEY.to_string(), signer).expect("service init")
+}
 
 fn authed(body: proto::AttestationRequest) -> Request<proto::AttestationRequest> {
     let mut request = Request::new(body);
@@ -46,7 +55,7 @@ async fn test_real_proof_verifies_valid() {
     let mut verifier = RandomXVerifier::new(RANDOMX_SEED).expect("verifier init");
     let hash = verifier.hash(&input).expect("hash");
 
-    let service = NodeServiceImpl::new(API_KEY.to_string()).expect("service init");
+    let service = test_service();
 
     // Difficulty 1 means any hash meets the target, isolating the hash match.
     let request = authed(attestation(hash.to_vec(), input, 1));
@@ -57,7 +66,15 @@ async fn test_real_proof_verifies_valid() {
         .into_inner();
 
     assert!(response.valid, "a real proof must verify valid=true");
-    assert!(response.signature.is_some(), "valid attestation must be signed");
+    let signature = response.signature.expect("valid attestation must be signed");
+
+    // Regression guard for the attestation transport: the node's signature must
+    // be a coordinator-parseable secp256k1 signature (64 or 65 bytes), not a
+    // 32-byte digest. The node-coordinator parses it with Signature::try_from.
+    let len = signature.signature.len();
+    assert!(len == 64 || len == 65, "signature must be 64 or 65 bytes, got {len}");
+    Signature::try_from(signature.signature.as_slice())
+        .expect("node signature must parse as a secp256k1 Signature");
 }
 
 #[tokio::test]
@@ -70,7 +87,7 @@ async fn test_tampered_hash_rejected() {
     // Flip a byte so the claimed hash no longer matches the real RandomX hash.
     hash[0] ^= 0xFF;
 
-    let service = NodeServiceImpl::new(API_KEY.to_string()).expect("service init");
+    let service = test_service();
 
     let request = authed(attestation(hash.to_vec(), input, 1));
     let response = service
