@@ -377,7 +377,7 @@ mod tests {
     use super::*;
     use alloy_primitives::{Address, Signature, U256};
     use chrono::{DateTime, Utc};
-    use common::{AttestationResult, Commodity, ProposalStatus, SessionId};
+    use common::{AttestationResult, Chain, Commodity, ProposalStatus, SessionId};
 
     const TEST_RPC: &str = "https://ethereum-rpc.publicnode.com";
 
@@ -391,6 +391,7 @@ mod tests {
             wallet: Address::ZERO,
             gross_prm: 0,
             commodity: Commodity::Gold,
+            chain: Chain::Ethereum,
             attestation: AttestationResult {
                 session_id: SessionId("0".to_string()),
                 signatures: Vec::new(),

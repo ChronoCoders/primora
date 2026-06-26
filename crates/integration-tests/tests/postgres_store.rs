@@ -1,7 +1,7 @@
 use alloy_primitives::{Address, Signature, U256};
 use chrono::Utc;
 use common::{
-    AnomalyEvent, AttestationResult, Commodity, InvalidReason, MintProposal, ProposalStatus,
+    AnomalyEvent, AttestationResult, Chain, Commodity, InvalidReason, MintProposal, ProposalStatus,
     SessionId, SuspicionLevel,
 };
 use postgres_store::PostgresStore;
@@ -51,6 +51,7 @@ async fn test_insert_and_update_mint_proposal() {
         wallet: Address::ZERO,
         gross_prm: 1_000_000_000_000_000_000u128,
         commodity: Commodity::Gold,
+        chain: Chain::Ethereum,
         attestation: AttestationResult {
             session_id: session_id.clone(),
             signatures: Vec::new(),

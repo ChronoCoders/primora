@@ -69,6 +69,8 @@ pub struct PendingProposalRow {
     pub gross_prm: String,
     /// Backing commodity name.
     pub commodity: String,
+    /// The chain this proposal mints to.
+    pub chain: String,
     /// Current proposal status.
     pub status: String,
     /// Proposal creation time.
@@ -86,6 +88,8 @@ pub struct PayoutRow {
     pub gross_prm: String,
     /// Backing commodity name.
     pub commodity: String,
+    /// The chain this proposal mints to.
+    pub chain: String,
     /// Current proposal status.
     pub status: String,
     /// Proposal creation time.
@@ -152,13 +156,14 @@ impl PostgresStore {
         let attestation_json = serde_json::to_value(&proposal.attestation)?;
         sqlx::query(
             "INSERT INTO mint_proposals \
-             (session_id, wallet, gross_prm, commodity, attestation_json, backend_sig, status, created_at) \
-             VALUES ($1, $2, $3::numeric, $4, $5::jsonb, $6, $7, $8)",
+             (session_id, wallet, gross_prm, commodity, chain, attestation_json, backend_sig, status, created_at) \
+             VALUES ($1, $2, $3::numeric, $4, $5, $6::jsonb, $7, $8, $9)",
         )
         .bind(proposal.session_id.0.as_str())
         .bind(format!("{:?}", proposal.wallet))
         .bind(proposal.gross_prm.to_string())
         .bind(format!("{:?}", proposal.commodity))
+        .bind(proposal.chain.as_str())
         .bind(attestation_json)
         .bind(format!("{}", proposal.backend_sig))
         .bind(format!("{:?}", proposal.status))
@@ -187,7 +192,7 @@ impl PostgresStore {
         &self,
     ) -> Result<Vec<PendingProposalRow>, PostgresStoreError> {
         let rows = sqlx::query(
-            "SELECT id, session_id, wallet, gross_prm::text AS gross_prm, commodity, status, created_at \
+            "SELECT id, session_id, wallet, gross_prm::text AS gross_prm, commodity, chain, status, created_at \
              FROM mint_proposals WHERE status = 'Pending' ORDER BY created_at ASC",
         )
         .fetch_all(&self.pool)
@@ -201,6 +206,7 @@ impl PostgresStore {
                 wallet: row.try_get("wallet")?,
                 gross_prm: row.try_get("gross_prm")?,
                 commodity: row.try_get("commodity")?,
+                chain: row.try_get("chain")?,
                 status: row.try_get("status")?,
                 created_at: row.try_get("created_at")?,
             });
@@ -218,7 +224,7 @@ impl PostgresStore {
         limit: i64,
     ) -> Result<Vec<PayoutRow>, PostgresStoreError> {
         let rows = sqlx::query(
-            "SELECT session_id, wallet, gross_prm::text AS gross_prm, commodity, status, created_at \
+            "SELECT session_id, wallet, gross_prm::text AS gross_prm, commodity, chain, status, created_at \
              FROM mint_proposals WHERE wallet = $1 ORDER BY created_at DESC LIMIT $2",
         )
         .bind(wallet)
@@ -233,6 +239,7 @@ impl PostgresStore {
                 wallet: row.try_get("wallet")?,
                 gross_prm: row.try_get("gross_prm")?,
                 commodity: row.try_get("commodity")?,
+                chain: row.try_get("chain")?,
                 status: row.try_get("status")?,
                 created_at: row.try_get("created_at")?,
             });
@@ -243,7 +250,8 @@ impl PostgresStore {
     /// Returns a wallet's earnings aggregated by commodity. `wallet` must already
     /// be debug-formatted (`format!("{:?}", _)`) to match stored rows. The gross
     /// PRM sum is cast to text to preserve full NUMERIC precision without
-    /// floating point.
+    /// floating point. Earnings are aggregated across all chains (not split by
+    /// chain), matching the Overview mock's commodity-only breakdown.
     pub async fn get_earnings_by_commodity(
         &self,
         wallet: &str,
@@ -274,7 +282,7 @@ mod tests {
     // Run with: cargo test -p postgres-store -- --ignored
     use super::*;
     use alloy_primitives::{Address, Signature, U256};
-    use common::{AttestationResult, Commodity, InvalidReason, SuspicionLevel};
+    use common::{AttestationResult, Chain, Commodity, InvalidReason, SuspicionLevel};
 
     const TEST_DB: &str = "postgres://postgres:postgres@localhost/primora_test";
 
@@ -299,12 +307,13 @@ mod tests {
         }
     }
 
-    fn dummy_proposal(session_id: &str) -> MintProposal {
+    fn dummy_proposal(session_id: &str, chain: Chain) -> MintProposal {
         MintProposal {
             session_id: SessionId(session_id.to_string()),
             wallet: Address::ZERO,
             gross_prm: 18_000_000_000_000_000_000_000,
             commodity: Commodity::Gold,
+            chain,
             attestation: AttestationResult {
                 session_id: SessionId(session_id.to_string()),
                 signatures: Vec::new(),
@@ -330,7 +339,7 @@ mod tests {
     async fn test_insert_mint_proposal() {
         let store = store().await;
         store
-            .insert_mint_proposal(&dummy_proposal("sess-insert"))
+            .insert_mint_proposal(&dummy_proposal("sess-insert", Chain::Ethereum))
             .await
             .unwrap();
     }
@@ -341,7 +350,7 @@ mod tests {
         let store = store().await;
         let session_id = SessionId("sess-update".to_string());
         store
-            .insert_mint_proposal(&dummy_proposal("sess-update"))
+            .insert_mint_proposal(&dummy_proposal("sess-update", Chain::Ethereum))
             .await
             .unwrap();
         store
@@ -355,11 +364,12 @@ mod tests {
     async fn test_get_pending_proposals() {
         let store = store().await;
         store
-            .insert_mint_proposal(&dummy_proposal("sess-pending"))
+            .insert_mint_proposal(&dummy_proposal("sess-pending", Chain::Ethereum))
             .await
             .unwrap();
         let pending = store.get_pending_proposals().await.unwrap();
         assert!(pending.iter().all(|row| row.status == "Pending"));
+        assert!(pending.iter().all(|row| row.chain == "ethereum" || row.chain == "polygon"));
     }
 
     #[tokio::test]
@@ -367,14 +377,44 @@ mod tests {
     async fn test_get_payouts_for_wallet() {
         let store = store().await;
         store
-            .insert_mint_proposal(&dummy_proposal("sess-payout"))
+            .insert_mint_proposal(&dummy_proposal("sess-payout", Chain::Polygon))
             .await
             .unwrap();
         let wallet = format!("{:?}", Address::ZERO);
         let payouts = store.get_payouts_for_wallet(&wallet, 50).await.unwrap();
-        assert!(payouts.iter().any(|p| p.session_id == "sess-payout"));
-        assert!(payouts.iter().all(|p| p.wallet == wallet));
-        assert!(payouts.iter().all(|p| p.gross_prm.parse::<u128>().is_ok()));
+        let row = payouts
+            .iter()
+            .find(|p| p.session_id == "sess-payout")
+            .expect("inserted payout present");
+        assert_eq!(row.wallet, wallet);
+        assert_eq!(row.chain, "polygon");
+        assert!(row.gross_prm.parse::<u128>().is_ok());
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_payout_chain_per_row() {
+        let store = store().await;
+        store
+            .insert_mint_proposal(&dummy_proposal("sess-eth", Chain::Ethereum))
+            .await
+            .unwrap();
+        store
+            .insert_mint_proposal(&dummy_proposal("sess-pol", Chain::Polygon))
+            .await
+            .unwrap();
+        let wallet = format!("{:?}", Address::ZERO);
+        let payouts = store.get_payouts_for_wallet(&wallet, 50).await.unwrap();
+        let eth = payouts
+            .iter()
+            .find(|p| p.session_id == "sess-eth")
+            .expect("ethereum proposal present");
+        let pol = payouts
+            .iter()
+            .find(|p| p.session_id == "sess-pol")
+            .expect("polygon proposal present");
+        assert_eq!(eth.chain, "ethereum");
+        assert_eq!(pol.chain, "polygon");
     }
 
     #[tokio::test]
@@ -382,7 +422,7 @@ mod tests {
     async fn test_get_earnings_by_commodity() {
         let store = store().await;
         store
-            .insert_mint_proposal(&dummy_proposal("sess-earn"))
+            .insert_mint_proposal(&dummy_proposal("sess-earn", Chain::Ethereum))
             .await
             .unwrap();
         let wallet = format!("{:?}", Address::ZERO);

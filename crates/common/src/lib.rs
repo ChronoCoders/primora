@@ -282,6 +282,8 @@ pub struct MintProposal {
     pub gross_prm: u128,
     /// Backing commodity.
     pub commodity: Commodity,
+    /// The chain this proposal mints to (Decision 4c).
+    pub chain: Chain,
     /// Supporting attestation.
     pub attestation: AttestationResult,
     /// Backend signature over the proposal.

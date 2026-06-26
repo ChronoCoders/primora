@@ -593,6 +593,7 @@ async fn end_session(
                 wallet: ctx.wallet,
                 gross_prm,
                 commodity: ctx.commodity,
+                chain: ctx.target_chain,
                 attestation: attestation_result,
                 backend_sig: Signature::new(U256::ZERO, U256::ZERO, false),
                 created_at: Utc::now(),
