@@ -57,10 +57,20 @@ fn parse_node_endpoints(raw: &str) -> Vec<String> {
         .collect()
 }
 
-/// Builds one [`OracleSubmitter`] per configured chain (Decision 4b). For each
-/// chain, the RPC, submitter key, and aggregator address env vars are read as a
-/// triple: all three present builds a submitter; all three absent skips that
-/// chain; a partial triple is a misconfiguration and exits the process.
+/// Builds one [`OracleSubmitter`] per configured chain (Decision 4b).
+///
+/// `{PREFIX}_RPC_URL` is shared per-chain infrastructure (also used by the 4d
+/// staking reader and read-only seed paths), so its presence alone does NOT
+/// configure or imply an oracle submitter. A submitter is keyed solely on its
+/// two submitter-specific vars; the RPC is then required to actually build it.
+///
+/// Per-chain config matrix (KEY = `{PREFIX}_ORACLE_SUBMITTER_KEY_HEX`, ADDR =
+/// `{PREFIX}_ORACLE_AGGREGATOR_ADDRESS`, RPC = `{PREFIX}_RPC_URL`):
+///   - KEY + ADDR + RPC -> submitter built.
+///   - neither KEY nor ADDR -> no submitter (skip), regardless of RPC. RPC alone
+///     is valid: the chain may be staking-only or read-only.
+///   - exactly one of KEY/ADDR -> fatal: genuine partial oracle config.
+///   - KEY + ADDR but no RPC -> fatal: submitter has no endpoint to submit to.
 ///
 /// `ETHEREUM_RPC_URL` (submission) is independent of `RPC_URL` (the canonical
 /// oracle read); the two may point at the same endpoint but are configured
@@ -76,8 +86,12 @@ async fn build_oracle_submitters() -> Vec<(Chain, Arc<OracleSubmitter>)> {
         let rpc = std::env::var(format!("{prefix}_RPC_URL")).ok();
         let key = std::env::var(format!("{prefix}_ORACLE_SUBMITTER_KEY_HEX")).ok();
         let addr = std::env::var(format!("{prefix}_ORACLE_AGGREGATOR_ADDRESS")).ok();
-        match (rpc, key, addr) {
-            (Some(rpc), Some(key), Some(addr)) => {
+        match (key, addr) {
+            (Some(key), Some(addr)) => {
+                let Some(rpc) = rpc else {
+                    tracing::error!(chain = %chain, "startup failed: {prefix}_ORACLE_SUBMITTER_KEY_HEX and {prefix}_ORACLE_AGGREGATOR_ADDRESS set but {prefix}_RPC_URL missing");
+                    std::process::exit(1);
+                };
                 let address = match Address::from_str(&addr) {
                     Ok(address) => address,
                     Err(e) => {
@@ -103,9 +117,9 @@ async fn build_oracle_submitters() -> Vec<(Chain, Arc<OracleSubmitter>)> {
                     }
                 }
             }
-            (None, None, None) => {}
+            (None, None) => {}
             _ => {
-                tracing::error!(chain = %chain, "startup failed: partial oracle submitter config (need all of {prefix}_RPC_URL, {prefix}_ORACLE_SUBMITTER_KEY_HEX, {prefix}_ORACLE_AGGREGATOR_ADDRESS, or none)");
+                tracing::error!(chain = %chain, "startup failed: partial oracle submitter config (need both {prefix}_ORACLE_SUBMITTER_KEY_HEX and {prefix}_ORACLE_AGGREGATOR_ADDRESS, or neither)");
                 std::process::exit(1);
             }
         }
