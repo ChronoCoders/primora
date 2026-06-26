@@ -86,6 +86,9 @@ pub struct PayoutRow {
     pub wallet: String,
     /// Gross PRM as a decimal string (NUMERIC rendered as text).
     pub gross_prm: String,
+    /// Net payout in USD cents (Spec 4.8). `None` for rows that predate USD
+    /// persistence; the frontend renders a dash for these.
+    pub net_usd_cents: Option<i64>,
     /// Backing commodity name.
     pub commodity: String,
     /// The chain this proposal mints to.
@@ -105,6 +108,10 @@ pub struct EarningsRow {
     pub session_count: i64,
     /// Summed gross PRM as a decimal string (NUMERIC SUM rendered as text).
     pub total_gross_prm: String,
+    /// Gross USD value of the summed PRM in cents, at the fixed PRM reference
+    /// price (Spec 4.8, [`payout_calculator::prm_to_usd_cents`]). This is a
+    /// gross figure (the earnings endpoint is gross, before the house edge).
+    pub total_usd_cents: i64,
 }
 
 /// Postgres-backed store for anomaly events and mint proposals.
@@ -156,12 +163,13 @@ impl PostgresStore {
         let attestation_json = serde_json::to_value(&proposal.attestation)?;
         sqlx::query(
             "INSERT INTO mint_proposals \
-             (session_id, wallet, gross_prm, commodity, chain, attestation_json, backend_sig, status, created_at) \
-             VALUES ($1, $2, $3::numeric, $4, $5, $6::jsonb, $7, $8, $9)",
+             (session_id, wallet, gross_prm, net_usd_cents, commodity, chain, attestation_json, backend_sig, status, created_at) \
+             VALUES ($1, $2, $3::numeric, $4, $5, $6, $7::jsonb, $8, $9, $10)",
         )
         .bind(proposal.session_id.0.as_str())
         .bind(format!("{:?}", proposal.wallet))
         .bind(proposal.gross_prm.to_string())
+        .bind(proposal.net_usd_cents)
         .bind(format!("{:?}", proposal.commodity))
         .bind(proposal.chain.as_str())
         .bind(attestation_json)
@@ -224,7 +232,7 @@ impl PostgresStore {
         limit: i64,
     ) -> Result<Vec<PayoutRow>, PostgresStoreError> {
         let rows = sqlx::query(
-            "SELECT session_id, wallet, gross_prm::text AS gross_prm, commodity, chain, status, created_at \
+            "SELECT session_id, wallet, gross_prm::text AS gross_prm, net_usd_cents, commodity, chain, status, created_at \
              FROM mint_proposals WHERE wallet = $1 ORDER BY created_at DESC LIMIT $2",
         )
         .bind(wallet)
@@ -238,6 +246,7 @@ impl PostgresStore {
                 session_id: row.try_get("session_id")?,
                 wallet: row.try_get("wallet")?,
                 gross_prm: row.try_get("gross_prm")?,
+                net_usd_cents: row.try_get("net_usd_cents")?,
                 commodity: row.try_get("commodity")?,
                 chain: row.try_get("chain")?,
                 status: row.try_get("status")?,
@@ -267,10 +276,15 @@ impl PostgresStore {
 
         let mut earnings = Vec::with_capacity(rows.len());
         for row in rows {
+            let total_gross_prm: String = row.try_get("total_gross_prm")?;
+            let prm: u128 = total_gross_prm.parse().unwrap_or(0);
+            let total_usd_cents =
+                i64::try_from(payout_calculator::prm_to_usd_cents(prm)).unwrap_or(i64::MAX);
             earnings.push(EarningsRow {
                 commodity: row.try_get("commodity")?,
                 session_count: row.try_get("session_count")?,
-                total_gross_prm: row.try_get("total_gross_prm")?,
+                total_gross_prm,
+                total_usd_cents,
             });
         }
         Ok(earnings)
@@ -312,6 +326,7 @@ mod tests {
             session_id: SessionId(session_id.to_string()),
             wallet: Address::ZERO,
             gross_prm: 18_000_000_000_000_000_000_000,
+            net_usd_cents: Some(1_531),
             commodity: Commodity::Gold,
             chain,
             attestation: AttestationResult {
@@ -389,6 +404,7 @@ mod tests {
         assert_eq!(row.wallet, wallet);
         assert_eq!(row.chain, "polygon");
         assert!(row.gross_prm.parse::<u128>().is_ok());
+        assert_eq!(row.net_usd_cents, Some(1_531));
     }
 
     #[tokio::test]
@@ -430,5 +446,16 @@ mod tests {
         assert!(earnings.iter().any(|e| e.commodity == "Gold"));
         assert!(earnings.iter().all(|e| e.session_count >= 1));
         assert!(earnings.iter().all(|e| e.total_gross_prm.parse::<u128>().is_ok()));
+        let gold = earnings
+            .iter()
+            .find(|e| e.commodity == "Gold")
+            .expect("gold earnings present");
+        assert_eq!(
+            gold.total_usd_cents,
+            i64::try_from(payout_calculator::prm_to_usd_cents(
+                gold.total_gross_prm.parse::<u128>().unwrap()
+            ))
+            .unwrap_or(i64::MAX)
+        );
     }
 }

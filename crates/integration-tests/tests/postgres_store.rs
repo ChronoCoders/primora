@@ -50,6 +50,7 @@ async fn test_insert_and_update_mint_proposal() {
         session_id: session_id.clone(),
         wallet: Address::ZERO,
         gross_prm: 1_000_000_000_000_000_000u128,
+        net_usd_cents: Some(1_531),
         commodity: Commodity::Gold,
         chain: Chain::Ethereum,
         attestation: AttestationResult {

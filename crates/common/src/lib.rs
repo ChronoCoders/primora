@@ -280,6 +280,9 @@ pub struct MintProposal {
     pub wallet: Address,
     /// Gross PRM as a scaled integer.
     pub gross_prm: u128,
+    /// Net payout in USD cents (redemption minus house edge, Spec 4.6). `None`
+    /// for proposals created before USD figures were persisted (Spec 4.8 wiring).
+    pub net_usd_cents: Option<i64>,
     /// Backing commodity.
     pub commodity: Commodity,
     /// The chain this proposal mints to (Decision 4c).

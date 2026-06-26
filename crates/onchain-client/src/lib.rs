@@ -459,6 +459,7 @@ mod tests {
             session_id: SessionId("0".to_string()),
             wallet: Address::ZERO,
             gross_prm: 0,
+            net_usd_cents: None,
             commodity: Commodity::Gold,
             chain: Chain::Ethereum,
             attestation: AttestationResult {

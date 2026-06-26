@@ -16,6 +16,26 @@ const USDC_SCALE: u128 = 1_000_000;
 /// Basis-point denominator (`10_000` bps = `100%`).
 const BPS_DENOMINATOR: u128 = 10_000;
 
+/// Fixed PRM reference price in USD, scaled to 8 decimals (Spec 4.8).
+/// `$0.10` per PRM = `10_000_000`. Used for all PRM->USD conversions until PRM
+/// trades on a market, at which point this is replaced by the real price.
+pub const PRM_REFERENCE_PRICE_8DEC: u128 = 10_000_000;
+
+/// Divisor rescaling an 8-decimal USD value to cents (2 decimals): `10^(8-2)`.
+const USD_8DEC_TO_CENTS: u128 = 1_000_000;
+
+/// Converts a PRM amount (plain PRM units as `u128`) to USD cents using the
+/// fixed reference price [`PRM_REFERENCE_PRICE_8DEC`] (Spec 4.8). Integer math
+/// only; no float.
+///
+/// Scale: `prm_amount` (plain PRM) * [`PRM_REFERENCE_PRICE_8DEC`] yields USD at
+/// 8-decimal precision (`prm * $0.10`); dividing by [`USD_8DEC_TO_CENTS`]
+/// (`10^6`) rescales that to cents. Examples: `1000 PRM -> $100.00 -> 10_000`
+/// cents; `148 PRM -> $14.80 -> 1_480` cents; `0 -> 0`.
+pub fn prm_to_usd_cents(prm_amount: u128) -> u128 {
+    prm_amount * PRM_REFERENCE_PRICE_8DEC / USD_8DEC_TO_CENTS
+}
+
 /// Calibration constants for the payout formula.
 #[derive(Debug, Clone)]
 pub struct PayoutConfig {
@@ -225,6 +245,13 @@ pub fn calculate_payout_from_gross(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_prm_to_usd_cents() {
+        assert_eq!(prm_to_usd_cents(1000), 10_000);
+        assert_eq!(prm_to_usd_cents(148), 1_480);
+        assert_eq!(prm_to_usd_cents(0), 0);
+    }
 
     #[test]
     fn test_gross_prm_gold_8h() {

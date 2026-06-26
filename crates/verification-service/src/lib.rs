@@ -28,6 +28,9 @@ use tower_http::trace::TraceLayer;
 /// Number of blocks behind the head used to derive the session seed.
 const SEED_BLOCK_OFFSET: u64 = 3;
 
+/// Divisor converting a 6-decimal USDC amount to cents (2 decimals): `10^(6-2)`.
+const NET_USDC_SCALE_TO_CENTS: u128 = 10_000;
+
 /// Default number of payout rows returned by the payouts endpoint.
 const DEFAULT_PAYOUT_LIMIT: i64 = 50;
 /// Maximum number of payout rows the payouts endpoint will return.
@@ -729,6 +732,7 @@ async fn end_session(
                 &payout_config,
             );
             let gross_prm = payout_result.gross_prm;
+            let net_usd_cents = i64::try_from(payout_result.net_usdc_scaled / NET_USDC_SCALE_TO_CENTS).ok();
             tracing::info!(
                 session_id = %session_id.0,
                 gross_prm = %payout_result.gross_prm,
@@ -742,6 +746,7 @@ async fn end_session(
                 session_id: session_id.clone(),
                 wallet: ctx.wallet,
                 gross_prm,
+                net_usd_cents,
                 commodity: ctx.commodity,
                 chain: ctx.target_chain,
                 attestation: attestation_result,

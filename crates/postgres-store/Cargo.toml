@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 common = { path = "../common" }
+payout-calculator = { path = "../payout-calculator" }
 sqlx = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }
