@@ -52,7 +52,8 @@ contract StakingContractTest is Test {
         staking = StakingContract(
             address(
                 new ERC1967Proxy(
-                    address(impl), abi.encodeCall(StakingContract.initialize, (owner, address(prm)))
+                    address(impl),
+                    abi.encodeCall(StakingContract.initialize, (owner, address(prm), 10_000e18, true))
                 )
             )
         );
@@ -61,12 +62,33 @@ contract StakingContractTest is Test {
         prm.mint(bob, 1_000_000e18);
     }
 
-    /// @notice Stakes `amount` for `period` as `user`.
+    /// @notice Stakes `amount` for `period` as `user` against the default
+    ///         (Ethereum-config) staking contract.
     function _stake(address user, uint256 amount, StakingContract.LockPeriod period) internal {
+        _stakeOn(staking, user, amount, period);
+    }
+
+    /// @notice Stakes `amount` for `period` as `user` against `s`.
+    function _stakeOn(StakingContract s, address user, uint256 amount, StakingContract.LockPeriod period)
+        internal
+    {
         vm.startPrank(user);
-        prm.approve(address(staking), amount);
-        staking.stake(amount, period);
+        prm.approve(address(s), amount);
+        s.stake(amount, period);
         vm.stopPrank();
+    }
+
+    /// @notice Deploys a Polygon-config staking contract (100 PRM min, no lock).
+    function _deployPolygon() internal returns (StakingContract) {
+        StakingContract impl = new StakingContract();
+        return StakingContract(
+            address(
+                new ERC1967Proxy(
+                    address(impl),
+                    abi.encodeCall(StakingContract.initialize, (owner, address(prm), 100e18, false))
+                )
+            )
+        );
     }
 
     /// @notice Initialization wires the staking token.
@@ -79,7 +101,9 @@ contract StakingContractTest is Test {
     function test_initialize_revert_zero_token() public {
         StakingContract impl = new StakingContract();
         vm.expectRevert(StakingContract.ZeroAddress.selector);
-        new ERC1967Proxy(address(impl), abi.encodeCall(StakingContract.initialize, (owner, address(0))));
+        new ERC1967Proxy(
+            address(impl), abi.encodeCall(StakingContract.initialize, (owner, address(0), 10_000e18, true))
+        );
     }
 
     /// @notice A valid stake is recorded with the correct unlock time.
@@ -212,5 +236,48 @@ contract StakingContractTest is Test {
         _stake(alice, 10_000e18, StakingContract.LockPeriod.Days30);
         _stake(bob, 10_000e18, StakingContract.LockPeriod.Days30);
         assertEq(staking.getStakerCount(), 2);
+    }
+
+    /// @notice Polygon config: 100 PRM stake succeeds; 99 PRM reverts below min.
+    function test_polygon_min_stake() public {
+        StakingContract pol = _deployPolygon();
+        assertEq(pol.minStake(), 100e18);
+        assertFalse(pol.lockRequired());
+        _stakeOn(pol, alice, 100e18, StakingContract.LockPeriod.Days30);
+        (uint256 amount,,,, bool active) = pol.stakes(alice);
+        assertEq(amount, 100e18);
+        assertTrue(active);
+        vm.startPrank(bob);
+        prm.approve(address(pol), 99e18);
+        vm.expectRevert(
+            abi.encodeWithSelector(StakingContract.BelowMinimumStake.selector, uint256(99e18), uint256(100e18))
+        );
+        pol.stake(99e18, StakingContract.LockPeriod.Days30);
+        vm.stopPrank();
+    }
+
+    /// @notice Polygon config: stake is withdrawable immediately, no warp.
+    function test_polygon_no_lock_unstake_anytime() public {
+        StakingContract pol = _deployPolygon();
+        _stakeOn(pol, alice, 100e18, StakingContract.LockPeriod.Days30);
+        (,, uint256 stakedAt, uint256 unlockAt,) = pol.stakes(alice);
+        assertEq(unlockAt, stakedAt);
+        vm.prank(alice);
+        pol.unstake();
+        (uint256 amount,,,, bool active) = pol.stakes(alice);
+        assertEq(amount, 0);
+        assertFalse(active);
+        assertEq(prm.balanceOf(alice), 1_000_000e18);
+        assertEq(pol.totalStaked(), 0);
+    }
+
+    /// @notice Polygon config: the lock multiplier is always 1.0x, so the
+    ///         effective boost equals the base boost even when a longer lock
+    ///         period is supplied.
+    function test_polygon_boost_is_base_only() public {
+        StakingContract pol = _deployPolygon();
+        _stakeOn(pol, alice, 100_000e18, StakingContract.LockPeriod.Days180);
+        assertEq(pol.effectiveBoostBps(alice), pol.baseBoostBps(100_000e18));
+        assertEq(pol.effectiveBoostBps(alice), 1_800);
     }
 }

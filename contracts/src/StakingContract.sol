@@ -13,8 +13,6 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 contract StakingContract is OwnableUpgradeable, UUPSUpgradeable {
     using SafeERC20 for IERC20;
 
-    /// @notice Minimum PRM stake required.
-    uint256 public constant MIN_STAKE = 10_000e18;
     /// @notice Hard cap on effective mining boost (40%).
     uint256 public constant MAX_BOOST_BPS = 4_000;
     /// @notice 30-day lock duration.
@@ -43,6 +41,12 @@ contract StakingContract is OwnableUpgradeable, UUPSUpgradeable {
     IERC20 public primToken;
     /// @notice Total PRM currently staked across all active stakers.
     uint256 public totalStaked;
+    /// @notice Per-chain minimum stake, set at initialize (Ethereum 10,000 PRM,
+    ///         Polygon 100 PRM).
+    uint256 public minStake;
+    /// @notice Whether a lock period is mandatory on this chain, set at
+    ///         initialize (Ethereum true, Polygon false).
+    bool public lockRequired;
 
     /// @notice A user's active stake.
     struct StakeInfo {
@@ -87,26 +91,48 @@ contract StakingContract is OwnableUpgradeable, UUPSUpgradeable {
     /// @notice Thrown when a zero address is supplied where disallowed.
     error ZeroAddress();
 
-    /// @notice Initializes ownership and the staking token.
+    /// @notice Initializes ownership, the staking token, and the per-chain
+    ///         staking parameters.
     /// @param initialOwner The address granted ownership of the contract.
     /// @param _primToken The PRM token users stake.
-    function initialize(address initialOwner, address _primToken) external initializer {
+    /// @param _minStake The per-chain minimum stake required.
+    /// @param _lockRequired Whether a lock period is mandatory on this chain.
+    function initialize(address initialOwner, address _primToken, uint256 _minStake, bool _lockRequired)
+        external
+        initializer
+    {
         if (_primToken == address(0)) revert ZeroAddress();
         __Ownable_init(initialOwner);
         primToken = IERC20(_primToken);
+        minStake = _minStake;
+        lockRequired = _lockRequired;
     }
 
-    /// @notice Stakes PRM under a lock period, pulling tokens via allowance.
-    /// @param amount The amount of PRM to stake; must be at least {MIN_STAKE}.
-    /// @param lockPeriod The chosen lock period.
+    /// @notice Stakes PRM, pulling tokens via allowance. On a lock-required
+    ///         chain (Ethereum) the stake locks for the chosen period and the
+    ///         lock multiplier applies. On a no-lock chain (Polygon) the stake
+    ///         is withdrawable immediately and the lock multiplier is always
+    ///         1.0x: the supplied `lockPeriod` is ignored and recorded as
+    ///         Days30 so {effectiveBoostBps} returns base boost only.
+    /// @param amount The amount of PRM to stake; must be at least {minStake}.
+    /// @param lockPeriod The chosen lock period; ignored when {lockRequired} is
+    ///        false on this chain.
     function stake(uint256 amount, LockPeriod lockPeriod) external {
-        if (amount < MIN_STAKE) revert BelowMinimumStake(amount, MIN_STAKE);
+        if (amount < minStake) revert BelowMinimumStake(amount, minStake);
         if (stakes[msg.sender].active) revert AlreadyStaking();
-        uint256 unlockAt = block.timestamp + _lockDuration(lockPeriod);
+        LockPeriod storedPeriod;
+        uint256 unlockAt;
+        if (lockRequired) {
+            storedPeriod = lockPeriod;
+            unlockAt = block.timestamp + _lockDuration(lockPeriod);
+        } else {
+            storedPeriod = LockPeriod.Days30;
+            unlockAt = block.timestamp;
+        }
         primToken.safeTransferFrom(msg.sender, address(this), amount);
         stakes[msg.sender] = StakeInfo({
             amount: amount,
-            lockPeriod: lockPeriod,
+            lockPeriod: storedPeriod,
             stakedAt: block.timestamp,
             unlockAt: unlockAt,
             active: true
@@ -116,7 +142,7 @@ contract StakingContract is OwnableUpgradeable, UUPSUpgradeable {
             stakers.push(msg.sender);
         }
         totalStaked += amount;
-        emit Staked(msg.sender, amount, lockPeriod, unlockAt);
+        emit Staked(msg.sender, amount, storedPeriod, unlockAt);
     }
 
     /// @notice Unstakes PRM once the lock period has expired.

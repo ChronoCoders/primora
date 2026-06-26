@@ -39,6 +39,11 @@ contract MockUSD is ERC20 {
 ///         them to deployments/local.json.
 contract DeployScript is Script {
     /// @notice Deploys, initializes, and wires the full contract set.
+    /// @dev StakingContract parameters default to the Ethereum config
+    ///      (10,000 PRM minimum, lock required). Override per chain via the
+    ///      STAKING_MIN_STAKE and STAKING_LOCK_REQUIRED env vars; a Polygon
+    ///      deploy sets STAKING_MIN_STAKE=100000000000000000000 (100e18) and
+    ///      STAKING_LOCK_REQUIRED=false.
     function run() external {
         vm.startBroadcast();
         address deployer = msg.sender;
@@ -95,7 +100,15 @@ contract DeployScript is Script {
             address(
                 new ERC1967Proxy(
                     address(new StakingContract()),
-                    abi.encodeCall(StakingContract.initialize, (deployer, address(primToken)))
+                    abi.encodeCall(
+                        StakingContract.initialize,
+                        (
+                            deployer,
+                            address(primToken),
+                            vm.envOr("STAKING_MIN_STAKE", uint256(10_000e18)),
+                            vm.envOr("STAKING_LOCK_REQUIRED", true)
+                        )
+                    )
                 )
             )
         );
