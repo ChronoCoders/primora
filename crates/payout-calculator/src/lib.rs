@@ -199,6 +199,19 @@ pub fn calculate_payout(
     config: &PayoutConfig,
 ) -> PayoutResult {
     let gross_prm = calculate_gross_prm(hashrate, duration_secs, config, commodity);
+    calculate_payout_from_gross(gross_prm, twap_price, commodity, config)
+}
+
+/// Computes the payout from a pre-computed `gross_prm`, skipping the gross
+/// derivation. Used when the gross already reflects a staking boost (Spec
+/// 6.5/4.6): the caller computes gross via [`calculate_gross_prm`], boosts it
+/// with [`apply_staking_boost`], then runs redemption and house edge here.
+pub fn calculate_payout_from_gross(
+    gross_prm: u128,
+    twap_price: u128,
+    commodity: &Commodity,
+    config: &PayoutConfig,
+) -> PayoutResult {
     let redemption_usd_scaled = calculate_redemption_usd(gross_prm, twap_price, commodity, config);
     let net_usdc_scaled = apply_house_edge(redemption_usd_scaled, config.house_edge_bps);
     PayoutResult {

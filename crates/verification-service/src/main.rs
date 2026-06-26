@@ -12,7 +12,7 @@ use anomaly_engine::AnomalyEngine;
 use common::{AnomalyEvent, Chain, NodeId};
 use mint_ceiling::MintCeilingCalculator;
 use node_coordinator::{GrpcNodeClient, NodeCoordinator};
-use onchain_client::{OnchainClient, OracleSubmitter};
+use onchain_client::{OnchainClient, OracleSubmitter, StakingReader};
 use postgres_store::PostgresStore;
 use rate_limiter::RateLimiter;
 use session_manager::SessionStore;
@@ -116,6 +116,53 @@ async fn build_oracle_submitters() -> Vec<(Chain, Arc<OracleSubmitter>)> {
         tracing::info!(chains = ?configured, "oracle submitters configured");
     }
     submitters
+}
+
+/// Builds one [`StakingReader`] per configured chain for the combined boost
+/// (Decision 4d). For each chain, the staking address is read alongside the
+/// chain's `{PREFIX}_RPC_URL` (reused from 4b). A chain is configured only when
+/// both its RPC URL and staking address are present; otherwise it is skipped
+/// with an info log. Staking boost is optional, so partial config is not fatal.
+async fn build_staking_readers() -> Vec<(Chain, Arc<StakingReader>)> {
+    let mut readers: Vec<(Chain, Arc<StakingReader>)> = Vec::new();
+    let mut configured: Vec<Chain> = Vec::new();
+    for chain in Chain::all() {
+        let prefix = match chain {
+            Chain::Ethereum => "ETHEREUM",
+            Chain::Polygon => "POLYGON",
+        };
+        let rpc = std::env::var(format!("{prefix}_RPC_URL")).ok();
+        let addr = std::env::var(format!("{prefix}_STAKING_ADDRESS")).ok();
+        match (rpc, addr) {
+            (Some(rpc), Some(addr)) => {
+                let address = match Address::from_str(&addr) {
+                    Ok(address) => address,
+                    Err(e) => {
+                        tracing::warn!(error = %e, chain = %chain, "invalid {prefix}_STAKING_ADDRESS, skipping staking boost on this chain");
+                        continue;
+                    }
+                };
+                match StakingReader::new(&rpc, address).await {
+                    Ok(reader) => {
+                        readers.push((chain, Arc::new(reader)));
+                        configured.push(chain);
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, chain = %chain, "staking reader init failed, skipping staking boost on this chain");
+                    }
+                }
+            }
+            _ => {
+                tracing::info!(chain = %chain, "staking reader not configured (need both {prefix}_RPC_URL and {prefix}_STAKING_ADDRESS)");
+            }
+        }
+    }
+    if configured.is_empty() {
+        tracing::info!("no staking readers configured, staking boost disabled");
+    } else {
+        tracing::info!(chains = ?configured, "staking readers configured");
+    }
+    readers
 }
 
 /// Loads and validates all configuration from the environment.
@@ -225,6 +272,7 @@ async fn main() {
     };
 
     let oracle_submitters = build_oracle_submitters().await;
+    let staking_readers = build_staking_readers().await;
 
     let mut node_ids: Vec<NodeId> = Vec::new();
     let mut first_client: Option<GrpcNodeClient> = None;
@@ -285,6 +333,7 @@ async fn main() {
         signing_key: Arc::new(signer),
         oracle_reader: Arc::new(oracle_reader),
         oracle_submitters,
+        staking_readers,
         twap_sessions: Arc::new(RwLock::new(HashMap::new())),
     };
 

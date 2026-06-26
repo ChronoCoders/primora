@@ -58,6 +58,9 @@ pub struct AppState {
     /// same computed TWAP is submitted to every entry. An empty vec means no
     /// chain is configured and on-chain submission is disabled.
     pub oracle_submitters: Vec<(common::Chain, Arc<onchain_client::OracleSubmitter>)>,
+    /// Per-chain staking readers for the combined cross-chain boost (Decision
+    /// 4d). An empty vec means no staking boost is applied (boost defaults to 0).
+    pub staking_readers: Vec<(common::Chain, Arc<onchain_client::StakingReader>)>,
     /// TWAP calculators keyed by session id, guarded for concurrent access.
     pub twap_sessions: Arc<RwLock<HashMap<String, TwapCalculator>>>,
 }
@@ -435,6 +438,59 @@ async fn submit_proof(
     }))
 }
 
+/// Computes the combined cross-chain staking boost for `wallet` (Decision 4d).
+///
+/// Reads the configured chains' StakingContracts concurrently, treats an
+/// inactive stake or any read error as no stake on that chain (degrades to no
+/// boost, never blocks the proposal), and returns the boost in basis points.
+/// Returns 0 when no staking readers are configured.
+async fn compute_staking_boost(state: &AppState, wallet: Address) -> u32 {
+    let ethereum_reader = state
+        .staking_readers
+        .iter()
+        .find(|(chain, _)| matches!(chain, Chain::Ethereum))
+        .map(|(_, reader)| Arc::clone(reader));
+    let polygon_reader = state
+        .staking_readers
+        .iter()
+        .find(|(chain, _)| matches!(chain, Chain::Polygon))
+        .map(|(_, reader)| Arc::clone(reader));
+
+    let (ethereum_result, polygon_result) = tokio::join!(
+        async {
+            match &ethereum_reader {
+                Some(reader) => Some(reader.read_stake(wallet).await),
+                None => None,
+            }
+        },
+        async {
+            match &polygon_reader {
+                Some(reader) => Some(reader.read_stake(wallet).await),
+                None => None,
+            }
+        },
+    );
+
+    let ethereum_stake = match ethereum_result {
+        Some(Ok(stake)) if stake.active => Some((stake.amount, stake.lock_period)),
+        Some(Ok(_)) | None => None,
+        Some(Err(e)) => {
+            tracing::warn!(error = %e, chain = "ethereum", "staking read failed, treating as no stake");
+            None
+        }
+    };
+    let polygon_stake = match polygon_result {
+        Some(Ok(stake)) if stake.active => Some(stake.amount),
+        Some(Ok(_)) | None => None,
+        Some(Err(e)) => {
+            tracing::warn!(error = %e, chain = "polygon", "staking read failed, treating as no stake");
+            None
+        }
+    };
+
+    payout_calculator::combined_boost_bps(ethereum_stake, polygon_stake)
+}
+
 /// Ends a session: verifies the commit-reveal nonce, finalizes the session TWAP,
 /// derives the on-chain seed, coordinates 2-of-3 node attestation, signs the
 /// resulting mint proposal with the backend key, and persists it.
@@ -571,9 +627,26 @@ async fn end_session(
                     tracing::warn!(error = %e, "failed to read average hashrate, using 0");
                     0
                 });
-            let payout_result = payout_calculator::calculate_payout(
+            let base_gross = payout_calculator::calculate_gross_prm(
                 avg_hashrate,
                 duration_secs,
+                &payout_config,
+                &ctx.commodity,
+            );
+            let boost_bps = compute_staking_boost(&state, ctx.wallet).await;
+            let boosted_gross = payout_calculator::apply_staking_boost(base_gross, boost_bps);
+            if boost_bps > 0 {
+                tracing::info!(
+                    session_id = %session_id.0,
+                    wallet = %ctx.wallet,
+                    base_gross = %base_gross,
+                    boost_bps,
+                    boosted_gross = %boosted_gross,
+                    "staking boost applied"
+                );
+            }
+            let payout_result = payout_calculator::calculate_payout_from_gross(
+                boosted_gross,
                 twap.twap,
                 &ctx.commodity,
                 &payout_config,
