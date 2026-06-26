@@ -86,6 +86,75 @@ pub enum Commodity {
     CrudeOil,
 }
 
+/// The blockchains Primora deploys to. The same contract suite runs
+/// independently on each; see Spec Decision #4 (dual-chain).
+///
+/// The enum is mainnet-semantic. For local Anvil testing, chain id 31337 maps to
+/// whichever chain the local deployment stands in for (tests configure this
+/// explicitly via config); there is deliberately no Anvil variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Chain {
+    /// Ethereum mainnet -- long-term investors, canonical chain for oracle
+    /// reads and node-selection seed.
+    Ethereum,
+    /// Polygon mainnet -- daily traders, low gas.
+    Polygon,
+}
+
+impl Chain {
+    /// The EVM chain id for this chain.
+    pub fn chain_id(&self) -> u64 {
+        match self {
+            Chain::Ethereum => 1,
+            Chain::Polygon => 137,
+        }
+    }
+
+    /// Parses from an EVM chain id, returning `None` for unknown ids.
+    pub fn from_chain_id(id: u64) -> Option<Chain> {
+        match id {
+            1 => Some(Chain::Ethereum),
+            137 => Some(Chain::Polygon),
+            _ => None,
+        }
+    }
+
+    /// Lowercase string identifier used in API requests and storage.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Chain::Ethereum => "ethereum",
+            Chain::Polygon => "polygon",
+        }
+    }
+
+    /// Parses from the lowercase string identifier.
+    pub fn from_str_id(s: &str) -> Option<Chain> {
+        match s {
+            "ethereum" => Some(Chain::Ethereum),
+            "polygon" => Some(Chain::Polygon),
+            _ => None,
+        }
+    }
+
+    /// True if this is the canonical chain (Ethereum) used for oracle reads and
+    /// the node-selection seed per Decisions #15 and #16.
+    pub fn is_canonical(&self) -> bool {
+        matches!(self, Chain::Ethereum)
+    }
+
+    /// All supported chains.
+    pub fn all() -> [Chain; 2] {
+        [Chain::Ethereum, Chain::Polygon]
+    }
+}
+
+impl std::fmt::Display for Chain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Session identifier.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionId(pub String);
@@ -247,5 +316,51 @@ impl AttestationResult {
     /// Assigned node signature is always index 0.
     pub fn is_sufficient(&self) -> bool {
         self.signatures.len() >= 2
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_chain_id_roundtrip() {
+        for chain in Chain::all() {
+            assert_eq!(Chain::from_chain_id(chain.chain_id()), Some(chain));
+        }
+    }
+
+    #[test]
+    fn test_chain_str_roundtrip() {
+        for chain in Chain::all() {
+            assert_eq!(Chain::from_str_id(chain.as_str()), Some(chain));
+        }
+    }
+
+    #[test]
+    fn test_unknown_chain_id() {
+        assert_eq!(Chain::from_chain_id(999), None);
+    }
+
+    #[test]
+    fn test_canonical() {
+        assert!(Chain::Ethereum.is_canonical());
+        assert!(!Chain::Polygon.is_canonical());
+    }
+
+    #[test]
+    fn test_serde_lowercase() {
+        assert_eq!(
+            serde_json::to_string(&Chain::Ethereum).unwrap(),
+            "\"ethereum\""
+        );
+        assert_eq!(
+            serde_json::to_string(&Chain::Polygon).unwrap(),
+            "\"polygon\""
+        );
+        assert_eq!(
+            serde_json::from_str::<Chain>("\"polygon\"").unwrap(),
+            Chain::Polygon
+        );
     }
 }
