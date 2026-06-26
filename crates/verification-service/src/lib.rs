@@ -54,9 +54,10 @@ pub struct AppState {
     pub signing_key: Arc<alloy::signers::local::PrivateKeySigner>,
     /// Oracle reader supplying Chainlink and Pyth prices for TWAP sampling.
     pub oracle_reader: Arc<oracle_reader::OracleReader>,
-    /// Optional on-chain TWAP submitter. When absent, the finalized TWAP is
-    /// computed but not submitted to the OracleAggregator.
-    pub oracle_submitter: Option<Arc<onchain_client::OracleSubmitter>>,
+    /// On-chain TWAP submitters, one per configured chain (Decision 4b). The
+    /// same computed TWAP is submitted to every entry. An empty vec means no
+    /// chain is configured and on-chain submission is disabled.
+    pub oracle_submitters: Vec<(common::Chain, Arc<onchain_client::OracleSubmitter>)>,
     /// TWAP calculators keyed by session id, guarded for concurrent access.
     pub twap_sessions: Arc<RwLock<HashMap<String, TwapCalculator>>>,
 }
@@ -493,16 +494,18 @@ async fn end_session(
         tracing::warn!(session = %session_id.0, "twap session below minimum valid duration");
     }
 
-    if let Some(submitter) = &state.oracle_submitter {
+    for (chain, submitter) in &state.oracle_submitters {
         let commodity_u8 = onchain_client::commodity_to_u8(&ctx.commodity);
         match submitter.submit_price(commodity_u8, twap.twap).await {
             Ok(tx_hash) => tracing::info!(
                 session_id = %session_id.0,
+                chain = %chain,
                 tx_hash = %tx_hash,
                 "TWAP submitted on-chain"
             ),
             Err(e) => tracing::error!(
                 error = %e,
+                chain = %chain,
                 "TWAP on-chain submission failed, continuing"
             ),
         }

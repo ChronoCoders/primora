@@ -9,7 +9,7 @@ use std::sync::Arc;
 use alloy::primitives::Address;
 use alloy::signers::local::PrivateKeySigner;
 use anomaly_engine::AnomalyEngine;
-use common::{AnomalyEvent, NodeId};
+use common::{AnomalyEvent, Chain, NodeId};
 use mint_ceiling::MintCeilingCalculator;
 use node_coordinator::{GrpcNodeClient, NodeCoordinator};
 use onchain_client::{OnchainClient, OracleSubmitter};
@@ -55,6 +55,67 @@ fn parse_node_endpoints(raw: &str) -> Vec<String> {
         .filter(|entry| !entry.is_empty())
         .map(str::to_string)
         .collect()
+}
+
+/// Builds one [`OracleSubmitter`] per configured chain (Decision 4b). For each
+/// chain, the RPC, submitter key, and aggregator address env vars are read as a
+/// triple: all three present builds a submitter; all three absent skips that
+/// chain; a partial triple is a misconfiguration and exits the process.
+///
+/// `ETHEREUM_RPC_URL` (submission) is independent of `RPC_URL` (the canonical
+/// oracle read); the two may point at the same endpoint but are configured
+/// separately.
+async fn build_oracle_submitters() -> Vec<(Chain, Arc<OracleSubmitter>)> {
+    let mut submitters: Vec<(Chain, Arc<OracleSubmitter>)> = Vec::new();
+    let mut configured: Vec<Chain> = Vec::new();
+    for chain in Chain::all() {
+        let prefix = match chain {
+            Chain::Ethereum => "ETHEREUM",
+            Chain::Polygon => "POLYGON",
+        };
+        let rpc = std::env::var(format!("{prefix}_RPC_URL")).ok();
+        let key = std::env::var(format!("{prefix}_ORACLE_SUBMITTER_KEY_HEX")).ok();
+        let addr = std::env::var(format!("{prefix}_ORACLE_AGGREGATOR_ADDRESS")).ok();
+        match (rpc, key, addr) {
+            (Some(rpc), Some(key), Some(addr)) => {
+                let address = match Address::from_str(&addr) {
+                    Ok(address) => address,
+                    Err(e) => {
+                        tracing::error!(error = %e, chain = %chain, "startup failed: {prefix}_ORACLE_AGGREGATOR_ADDRESS parse");
+                        std::process::exit(1);
+                    }
+                };
+                let signer = match PrivateKeySigner::from_str(&key) {
+                    Ok(signer) => signer,
+                    Err(e) => {
+                        tracing::error!(error = %e, chain = %chain, "startup failed: {prefix}_ORACLE_SUBMITTER_KEY_HEX parse");
+                        std::process::exit(1);
+                    }
+                };
+                match OracleSubmitter::new(&rpc, signer, address).await {
+                    Ok(submitter) => {
+                        submitters.push((chain, Arc::new(submitter)));
+                        configured.push(chain);
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, chain = %chain, "startup failed: oracle submitter init");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            (None, None, None) => {}
+            _ => {
+                tracing::error!(chain = %chain, "startup failed: partial oracle submitter config (need all of {prefix}_RPC_URL, {prefix}_ORACLE_SUBMITTER_KEY_HEX, {prefix}_ORACLE_AGGREGATOR_ADDRESS, or none)");
+                std::process::exit(1);
+            }
+        }
+    }
+    if configured.is_empty() {
+        tracing::info!("no oracle submitters configured, TWAP submission disabled");
+    } else {
+        tracing::info!(chains = ?configured, "oracle submitters configured");
+    }
+    submitters
 }
 
 /// Loads and validates all configuration from the environment.
@@ -163,38 +224,7 @@ async fn main() {
         }
     };
 
-    let oracle_submitter = match (
-        std::env::var("ORACLE_AGGREGATOR_ADDRESS").ok(),
-        std::env::var("ORACLE_SUBMITTER_KEY_HEX").ok(),
-    ) {
-        (Some(addr_str), Some(key_hex)) => {
-            let address = match Address::from_str(&addr_str) {
-                Ok(address) => address,
-                Err(e) => {
-                    tracing::error!(error = %e, "startup failed: ORACLE_AGGREGATOR_ADDRESS parse");
-                    std::process::exit(1);
-                }
-            };
-            let submitter_signer = match PrivateKeySigner::from_str(&key_hex) {
-                Ok(signer) => signer,
-                Err(e) => {
-                    tracing::error!(error = %e, "startup failed: ORACLE_SUBMITTER_KEY_HEX parse");
-                    std::process::exit(1);
-                }
-            };
-            match OracleSubmitter::new(&config.rpc_url, submitter_signer, address).await {
-                Ok(submitter) => Some(Arc::new(submitter)),
-                Err(e) => {
-                    tracing::error!(error = %e, "startup failed: oracle submitter init");
-                    std::process::exit(1);
-                }
-            }
-        }
-        _ => {
-            tracing::info!("oracle submitter not configured, TWAP submission disabled");
-            None
-        }
-    };
+    let oracle_submitters = build_oracle_submitters().await;
 
     let mut node_ids: Vec<NodeId> = Vec::new();
     let mut first_client: Option<GrpcNodeClient> = None;
@@ -254,7 +284,7 @@ async fn main() {
         node_coordinator: Arc::new(node_coordinator),
         signing_key: Arc::new(signer),
         oracle_reader: Arc::new(oracle_reader),
-        oracle_submitter,
+        oracle_submitters,
         twap_sessions: Arc::new(RwLock::new(HashMap::new())),
     };
 
