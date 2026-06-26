@@ -185,6 +185,8 @@ pub struct SessionContext {
     pub assigned_node_id: Option<NodeId>,
     /// Commodity this session mines toward.
     pub commodity: Commodity,
+    /// The chain this session mints to, chosen at creation (Decision 4c).
+    pub target_chain: Chain,
 }
 
 /// A partial proof submitted every 30s.

@@ -4,7 +4,7 @@
 
 use alloy_primitives::Address;
 use chrono::{DateTime, Utc};
-use common::{PartialProof, SessionContext, SessionId};
+use common::{Chain, PartialProof, SessionContext, SessionId};
 use redis::aio::MultiplexedConnection;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -21,6 +21,8 @@ pub struct SessionSummary {
     pub commodity: String,
     /// Number of proofs counted for the session.
     pub proof_count: u32,
+    /// The chain this session mints to.
+    pub target_chain: Chain,
     /// UTC timestamp when the session was created.
     pub started_at: DateTime<Utc>,
     /// Timestamp of the last accepted proof submission, sourced from the
@@ -412,6 +414,7 @@ impl SessionStore {
                     session_id,
                     commodity: format!("{:?}", ctx.commodity),
                     proof_count: count.unwrap_or(0).max(0) as u32,
+                    target_chain: ctx.target_chain,
                     started_at: ctx.started_at,
                     last_submission_at,
                     status: "active".to_string(),
@@ -472,6 +475,7 @@ mod tests {
             recent_proof_count: 0,
             assigned_node_id: None,
             commodity: common::Commodity::Gold,
+            target_chain: Chain::Polygon,
         }
     }
 
@@ -542,6 +546,7 @@ mod tests {
             .expect("created session present in listing");
         assert_eq!(summary.status, "active");
         assert_eq!(summary.started_at, ctx.started_at);
+        assert_eq!(summary.target_chain, Chain::Polygon);
         assert!(summary.last_submission_at.is_none());
 
         let before = Utc::now().timestamp();

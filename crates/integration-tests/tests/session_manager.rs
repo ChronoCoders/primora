@@ -1,5 +1,5 @@
 use alloy_primitives::Address;
-use common::{ClientType, Commodity, SessionContext};
+use common::{Chain, ClientType, Commodity, SessionContext};
 use session_manager::SessionStore;
 use sha2::{Digest, Sha256};
 
@@ -25,6 +25,7 @@ fn sample_ctx() -> SessionContext {
         recent_proof_count: 0,
         assigned_node_id: None,
         commodity: Commodity::Gold,
+        target_chain: Chain::Ethereum,
     }
 }
 

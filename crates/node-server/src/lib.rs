@@ -6,8 +6,8 @@
 use alloy_primitives::Address;
 use chrono::Utc;
 use common::{
-    ClientType, Commodity, PartialProof, SessionContext, SessionId, SuspicionLevel, ValidationMode,
-    ValidationResult,
+    Chain, ClientType, Commodity, PartialProof, SessionContext, SessionId, SuspicionLevel,
+    ValidationMode, ValidationResult,
 };
 use randomx_verifier::{RandomXError, RandomXVerifier};
 use sha2::{Digest, Sha256};
@@ -198,6 +198,9 @@ impl NodeService for NodeServiceImpl {
                 recent_proof_count: 0,
                 assigned_node_id: None,
                 commodity: Commodity::Gold,
+                // Attestation is verification-only and never mints; the target
+                // chain is unused here, so default to the canonical chain.
+                target_chain: Chain::Ethereum,
             };
             match validator.validate(&proof, ValidationMode::PreFilter, &ctx) {
                 ValidationResult::Invalid(reason) => {

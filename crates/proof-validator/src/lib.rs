@@ -117,6 +117,7 @@ mod tests {
             recent_proof_count: 0,
             assigned_node_id: None,
             commodity: common::Commodity::Gold,
+            target_chain: common::Chain::Ethereum,
         }
     }
 

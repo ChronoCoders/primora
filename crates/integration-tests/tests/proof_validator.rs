@@ -1,8 +1,8 @@
 use alloy_primitives::{Address, Signature, U256};
 use chrono::{Duration, Utc};
 use common::{
-    ClientType, Commodity, InvalidReason, PartialProof, ProofValidator, SessionContext, SessionId,
-    SuspicionLevel, ValidationMode, ValidationResult,
+    Chain, ClientType, Commodity, InvalidReason, PartialProof, ProofValidator, SessionContext,
+    SessionId, SuspicionLevel, ValidationMode, ValidationResult,
 };
 use proof_validator::PreFilterValidator;
 
@@ -17,6 +17,7 @@ fn ctx(client_type: ClientType, active_sessions_count: u32, last: Option<chrono:
         recent_proof_count: 5,
         assigned_node_id: None,
         commodity: Commodity::Gold,
+        target_chain: Chain::Ethereum,
     }
 }
 

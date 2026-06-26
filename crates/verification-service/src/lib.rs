@@ -14,7 +14,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::Utc;
 use common::{
-    AnomalyEvent, ClientType, Commodity, InvalidReason, MintProposal, NodeId, NodeSignature,
+    AnomalyEvent, Chain, ClientType, Commodity, InvalidReason, MintProposal, NodeId, NodeSignature,
     PartialProof, ProofValidator, ProposalStatus, SessionContext, SessionId, SuspicionLevel,
     ValidationMode, ValidationResult,
 };
@@ -75,6 +75,8 @@ pub struct CreateSessionRequest {
     pub assigned_node_id: Option<String>,
     /// Backing commodity: `Gold`, `Silver`, `Platinum`, or `Oil`.
     pub commodity: String,
+    /// Target mint chain (Decision 4c): `ethereum` or `polygon`.
+    pub chain: String,
 }
 
 /// Response body for a created session.
@@ -263,6 +265,9 @@ async fn create_session(
     let client_type = parse_client_type(&body.client_type)?;
     let commit_hash = parse_hash(&body.commit_hash, "invalid commit_hash")?;
     let commodity = parse_commodity(&body.commodity);
+    let target_chain = Chain::from_str_id(&body.chain).ok_or(ApiError::BadRequest(
+        "invalid or missing chain (expected ethereum or polygon)",
+    ))?;
     let assigned_node_id = body.assigned_node_id.map(NodeId);
 
     let ip = peer.ip();
@@ -280,6 +285,7 @@ async fn create_session(
         recent_proof_count: 0,
         assigned_node_id,
         commodity,
+        target_chain,
     };
     let session_id = state.session_manager.create_session(&ctx).await?;
     state
@@ -785,6 +791,22 @@ mod tests {
     fn test_valid_wallet_parses_and_db_key_is_debug_format() {
         let addr = parse_wallet("0x0000000000000000000000000000000000000000").unwrap();
         assert_eq!(wallet_db_key(&addr), format!("{:?}", addr));
+    }
+
+    #[test]
+    fn test_invalid_chain_returns_400() {
+        let err = Chain::from_str_id("dogechain")
+            .ok_or(ApiError::BadRequest(
+                "invalid or missing chain (expected ethereum or polygon)",
+            ))
+            .unwrap_err();
+        assert_eq!(err.into_response().status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn test_valid_chain_polygon_parses() {
+        assert_eq!(Chain::from_str_id("polygon"), Some(Chain::Polygon));
+        assert_eq!(Chain::from_str_id("ethereum"), Some(Chain::Ethereum));
     }
 
     #[test]
