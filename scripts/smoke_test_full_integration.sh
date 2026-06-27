@@ -118,7 +118,7 @@ END=$(curl -s --max-time 90 -X POST $SERVICE/sessions/$SID/end -H "Content-Type:
 echo "end_session response: $END"
 
 echo "=== 11. Backend log: attestation path ==="
-grep -i "attestation\|TWAP submitted\|proposal\|payout calculated\|gross_prm" /tmp/backend_full.log | tail -12 || echo "(no matching backend log lines)"
+grep -i "attestation\|TWAP submitted\|proposal\|payout computed\|mint_amount_wei\|gross_calib" /tmp/backend_full.log | tail -12 || echo "(no matching backend log lines)"
 
 echo "=== 12. Node log: verification + signing ==="
 grep -i "attest\|verif\|sign\|randomx\|node starting" /tmp/node_full.log | tail -10 || echo "(no matching node log lines)"
@@ -177,9 +177,46 @@ else
   echo "  admin-cli execute FAILED: $OUT"
 fi
 
-echo "=== 16. Verify PRM minted (amount = payout gross_prm, not a fixed 1000e18) ==="
-echo "recipient PRM balance:"
-cast call $PRIM "balanceOf(address)(uint256)" $ADDR0 --rpc-url $ETH_RPC
+echo "=== 16. Verify minted amount is base-unit wei (mint-scale fix) ==="
+# The backend logs the calibration value and the converted base-unit mint amount.
+PAYOUT_LINE=$(grep "payout computed (mint amount in base units)" /tmp/backend_full.log | tail -1 || true)
+echo "payout log: $PAYOUT_LINE"
+read GROSS_CALIB MINT_WEI NET_CENTS < <(python3 - "$PAYOUT_LINE" <<'PY'
+import re, sys
+line = re.sub(r'\x1b\[[0-9;]*m', '', sys.argv[1])
+def grab(key):
+    m = re.search(rf'{key}=(\d+)', line)
+    return m.group(1) if m else ''
+nc = re.search(r'net_usd_cents=Some\((\d+)\)', line)
+print(grab('gross_calib'), grab('mint_amount_wei'), nc.group(1) if nc else '')
+PY
+)
+echo "parsed: gross_calib=$GROSS_CALIB mint_amount_wei=$MINT_WEI net_usd_cents=$NET_CENTS"
+
+DB_GROSS=$(docker compose exec -T postgres psql -U primora -d primora -t -A -c \
+  "SELECT gross_prm FROM mint_proposals WHERE session_id = '$SID';" | tr -d '[:space:]')
+BAL=$(cast call $PRIM "balanceOf(address)(uint256)" $ADDR0 --rpc-url $ETH_RPC | awk '{print $1}')
+EXPECTED_WEI=$(python3 -c "print(int('${GROSS_CALIB:-0}') * 10**13)")
+echo "expected_wei (gross_calib * 10^13) = $EXPECTED_WEI"
+echo "db gross_prm = $DB_GROSS | on-chain balanceOf = $BAL"
+
+PASS=1
+if echo "$END" | grep -q "completed"; then echo "OK: end_session completed (real attestation)"; else echo "FAIL: end_session not completed"; PASS=0; fi
+if [ -n "$MINT_WEI" ] && [ "$MINT_WEI" = "$EXPECTED_WEI" ]; then echo "OK: mint_amount_wei == gross_calib * 10^13"; else echo "FAIL: mint_amount_wei=$MINT_WEI != gross_calib*10^13=$EXPECTED_WEI"; PASS=0; fi
+if [ "$DB_GROSS" = "$MINT_WEI" ]; then echo "OK: mint_proposals.gross_prm == mint_amount_wei (wei stored)"; else echo "FAIL: db gross_prm=$DB_GROSS != mint_amount_wei=$MINT_WEI"; PASS=0; fi
+if [ "$BAL" = "$MINT_WEI" ]; then echo "OK: on-chain balanceOf == mint_amount_wei (base units minted)"; else echo "FAIL: balanceOf=$BAL != mint_amount_wei=$MINT_WEI"; PASS=0; fi
+if python3 -c "exit(0 if int('${MINT_WEI:-0}') < 10**24 else 1)"; then echo "OK: mint $MINT_WEI < ceiling 1e24 (no ceiling revert)"; else echo "FAIL: mint exceeds 1e24 ceiling"; PASS=0; fi
+python3 -c "print('human PRM minted =', int('${MINT_WEI:-0}') / 10**18, 'PRM')"
+echo "net_usd_cents = $NET_CENTS (a ~3s session redeems a fraction of a cent -> rounds to 0)"
+
+echo
+if [ "$PASS" = "1" ]; then
+  echo "MINT-SCALE FIX PROVEN END TO END: real human-PRM minted in base units (wei),"
+  echo "balanceOf == mint_amount_wei == gross_calib * 10^13, no ceiling revert."
+else
+  echo "RESULT: FAIL -- see assertions above."
+  exit 1
+fi
 
 echo "=== DONE ==="
 echo "Full chain: real proof -> node RandomX verify -> 65-byte sig -> coordinator"

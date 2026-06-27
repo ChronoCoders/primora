@@ -47,8 +47,11 @@ echo "=== 5. Build admin CLI ==="
 cargo build -p admin-cli --bin primora-admin 2>&1 | tail -2
 
 ADMIN="./target/debug/primora-admin"
-export RPC_URL="$RPC"
-export MINING_CONTRACT_ADDRESS="$MINING_ADDR"
+# admin-cli reads per-chain env (ETHEREUM_*) and requires --chain since the 4c
+# dual-chain refactor.
+export ETHEREUM_RPC_URL="$RPC"
+export ETHEREUM_MINING_CONTRACT_ADDRESS="$MINING_ADDR"
+export ETHEREUM_ADMIN_KEY_HEX="${KEY0#0x}"
 export DATABASE_URL="postgres://primora:primora_dev@localhost:5432/primora"
 
 # Derive proposalId = keccak256("test-session-001")
@@ -73,14 +76,14 @@ echo "proposed"
 
 echo "=== 7. Approve with 3 signers: deployer via CLI, two more via cast ==="
 echo "-- CLI approve (deployer / signer 0):"
-ADMIN_KEY_HEX="${KEY0#0x}" $ADMIN approve --proposal-id $PROPOSAL_ID
+$ADMIN approve --proposal-id $PROPOSAL_ID --chain ethereum
 echo "-- cast approve (signer vm.addr(1)):"
 cast send $MINING_ADDR "approveMint(bytes32)" $PROPOSAL_ID --private-key $SIGNER1_KEY --rpc-url $RPC > /dev/null && echo "approved"
 echo "-- cast approve (signer vm.addr(2)):"
 cast send $MINING_ADDR "approveMint(bytes32)" $PROPOSAL_ID --private-key $SIGNER2_KEY --rpc-url $RPC > /dev/null && echo "approved"
 
 echo "=== 8. Check status via CLI -- should show 3 approvals, timelock pending ==="
-ADMIN_KEY_HEX="${KEY0#0x}" $ADMIN status --proposal-id $PROPOSAL_ID
+$ADMIN status --proposal-id $PROPOSAL_ID --chain ethereum
 
 echo "=== 9. Try execute before timelock -- expect revert ==="
 OUT=$(cast send $MINING_ADDR "executeMint(bytes32)" $PROPOSAL_ID --private-key $KEY0 --rpc-url $RPC 2>&1 || true)
@@ -98,8 +101,15 @@ cast rpc evm_mine --rpc-url $RPC
 echo "=== 11. Execute mint -- should succeed now ==="
 cast send $MINING_ADDR "executeMint(bytes32)" $PROPOSAL_ID --private-key $KEY0 --rpc-url $RPC > /dev/null && echo "executed"
 
-echo "=== 12. Verify recipient received 1000 PRM ==="
-echo "Recipient PRM balance after: $(cast call $PRIM_ADDR "balanceOf(address)(uint256)" $ADDR0 --rpc-url $RPC)"
+echo "=== 12. Verify recipient received 1000 PRM (1000 * 10^18 base units) ==="
+BAL=$(cast call $PRIM_ADDR "balanceOf(address)(uint256)" $ADDR0 --rpc-url $RPC | awk '{print $1}')
+EXPECTED="1000000000000000000000"
+echo "Recipient PRM balance after: $BAL (expected $EXPECTED = 1000 PRM)"
+if [ "$BAL" = "$EXPECTED" ]; then
+  echo "OK: minted 1000 PRM in base units"
+else
+  echo "FAIL: balanceOf=$BAL != $EXPECTED"; exit 1
+fi
 
 echo "=== 13. Verify proposal marked executed ==="
 cast call $MINING_ADDR "proposals(bytes32)(bytes32,address,uint256,uint256,uint8,bool,bool)" \

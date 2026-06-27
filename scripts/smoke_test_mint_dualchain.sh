@@ -119,13 +119,18 @@ run_mint_on_chain ethereum $ETH_RPC $ETH_MINING $ETH_PRIM
 echo "=== 6. Mint on POLYGON ==="
 run_mint_on_chain polygon $POL_RPC $POL_MINING $POL_PRIM
 
-echo "=== 7. Cross-chain isolation check ==="
-echo "ETH PrimToken balance (should be 1000e18 from ETH mint only):"
-cast call $ETH_PRIM "balanceOf(address)(uint256)" $ADDR0 --rpc-url $ETH_RPC
-echo "POL PrimToken balance (should be 1000e18 from POL mint only):"
-cast call $POL_PRIM "balanceOf(address)(uint256)" $ADDR0 --rpc-url $POL_RPC
+echo "=== 7. Cross-chain isolation check (each chain == 1000 PRM base units) ==="
+EXPECTED="1000000000000000000000"
+ETH_BAL=$(cast call $ETH_PRIM "balanceOf(address)(uint256)" $ADDR0 --rpc-url $ETH_RPC | awk '{print $1}')
+POL_BAL=$(cast call $POL_PRIM "balanceOf(address)(uint256)" $ADDR0 --rpc-url $POL_RPC | awk '{print $1}')
+echo "ETH PrimToken balance: $ETH_BAL (expected $EXPECTED = 1000 PRM)"
+echo "POL PrimToken balance: $POL_BAL (expected $EXPECTED = 1000 PRM)"
+ISO_PASS=1
+[ "$ETH_BAL" = "$EXPECTED" ] && echo "OK: ETH minted 1000 PRM (base units)" || { echo "FAIL: ETH balanceOf=$ETH_BAL"; ISO_PASS=0; }
+[ "$POL_BAL" = "$EXPECTED" ] && echo "OK: POL minted 1000 PRM (base units)" || { echo "FAIL: POL balanceOf=$POL_BAL"; ISO_PASS=0; }
 echo "These are SEPARATE token contracts on SEPARATE chains -- each 1000e18,"
 echo "proving no bridge and correct per-chain isolation (Decision 4a)."
+[ "$ISO_PASS" = "1" ] || exit 1
 
 echo "=== DONE -- dual-chain mint lifecycle verified ==="
 echo "Routing summary: propose=cast; approve/status/execute=admin-cli --chain"

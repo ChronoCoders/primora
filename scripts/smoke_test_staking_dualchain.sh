@@ -211,7 +211,8 @@ if [ -z "$BOOST_LINE" ]; then
   exit 1
 fi
 
-# Parse base_gross / boost_bps / boosted_gross out of the tracing line.
+# Parse base_gross / boost_bps / boosted_gross (calibration values) out of the
+# "staking boost applied" line.
 read BASE_GROSS BOOST_BPS BOOSTED_GROSS < <(python3 - "$BOOST_LINE" <<'PY'
 import re, sys
 # Strip ANSI color codes the tracing fmt layer wraps around field separators.
@@ -222,27 +223,52 @@ def grab(key):
 print(grab('base_gross'), grab('boost_bps'), grab('boosted_gross'))
 PY
 )
-echo "parsed: base_gross=$BASE_GROSS boost_bps=$BOOST_BPS boosted_gross=$BOOSTED_GROSS"
+echo "parsed (calib): base_gross=$BASE_GROSS boost_bps=$BOOST_BPS boosted_gross=$BOOSTED_GROSS"
+
+# Parse the base-unit mint amount from the "payout computed" line (mint-scale fix).
+PAYOUT_LINE=$(grep "payout computed (mint amount in base units)" /tmp/backend_staking.log | tail -1 || true)
+MINT_WEI=$(python3 - "$PAYOUT_LINE" <<'PY'
+import re, sys
+line = re.sub(r'\x1b\[[0-9;]*m', '', sys.argv[1])
+m = re.search(r'mint_amount_wei=(\d+)', line)
+print(m.group(1) if m else '')
+PY
+)
+echo "parsed (wei): mint_amount_wei=$MINT_WEI"
 
 EXPECTED_BOOSTED=$(python3 -c "print(($BASE_GROSS * 11300) // 10000)")
+EXPECTED_WEI=$(python3 -c "print(int('${BOOSTED_GROSS:-0}') * 10**13)")
 
 PASS=1
 if [ "$BOOST_BPS" != "1300" ]; then echo "FAIL: boost_bps=$BOOST_BPS, expected 1300"; PASS=0; fi
 if [ "$BOOSTED_GROSS" != "$EXPECTED_BOOSTED" ]; then
-  echo "FAIL: boosted_gross=$BOOSTED_GROSS, expected base*1.13=$EXPECTED_BOOSTED"; PASS=0
+  echo "FAIL: boosted_gross(calib)=$BOOSTED_GROSS, expected base*1.13=$EXPECTED_BOOSTED"; PASS=0
 fi
-if [ "$DB_GROSS" != "$BOOSTED_GROSS" ]; then
-  echo "FAIL: mint_proposals.gross_prm=$DB_GROSS != boosted_gross=$BOOSTED_GROSS"; PASS=0
+if [ -n "$MINT_WEI" ] && [ "$MINT_WEI" = "$EXPECTED_WEI" ]; then
+  echo "OK: mint_amount_wei == boosted_calib * 10^13"
+else
+  echo "FAIL: mint_amount_wei=$MINT_WEI != boosted_calib*10^13=$EXPECTED_WEI"; PASS=0
+fi
+if [ "$DB_GROSS" = "$MINT_WEI" ]; then
+  echo "OK: mint_proposals.gross_prm == mint_amount_wei (wei, boost-carried)"
+else
+  echo "FAIL: mint_proposals.gross_prm=$DB_GROSS != mint_amount_wei=$MINT_WEI"; PASS=0
+fi
+if python3 -c "exit(0 if int('${MINT_WEI:-0}') < 10**24 else 1)"; then
+  echo "OK: mint $MINT_WEI < ceiling 1e24 (no ceiling revert)"
+else
+  echo "FAIL: mint exceeds 1e24 ceiling"; PASS=0
 fi
 
 echo
 if [ "$PASS" = "1" ]; then
-  echo "PASS: 4d proven end-to-end."
+  echo "PASS: 4d + mint-scale fix proven end-to-end."
   echo "  - backend read BOTH chains' StakingContracts (see step 8b / step 12)"
   echo "  - combined cross-chain tier: 60,000 PRM total -> 1000 bps base (10%)"
   echo "  - Ethereum 90-day lock -> x1.3 multiplier -> boost_bps=1300 (13%)"
-  echo "  - base_gross=$BASE_GROSS  ->  boosted_gross=$BOOSTED_GROSS (= base * 1.13)"
-  echo "  - mint_proposals.gross_prm=$DB_GROSS carries the boost"
+  echo "  - base_gross(calib)=$BASE_GROSS -> boosted_gross(calib)=$BOOSTED_GROSS (= base * 1.13)"
+  echo "  - mint_amount_wei=$MINT_WEI = boosted_calib * 10^13 (= $(python3 -c "print(int('${MINT_WEI:-0}')/10**18)") PRM)"
+  echo "  - mint_proposals.gross_prm=$DB_GROSS carries the boost in base units"
   echo "  - TEST-ONLY scaffolding: temporary setMinter(deployer) to fund stakeable PRM"
 else
   echo "RESULT: FAIL -- see assertions above."
