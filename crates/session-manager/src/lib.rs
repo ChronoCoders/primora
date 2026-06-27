@@ -39,6 +39,13 @@ pub struct SessionSummary {
     pub status: String,
     /// CPU worker threads for this session (0 if not reported).
     pub cpu_threads: u32,
+    /// Submitted proofs that passed pre-filter validation. Pre-filter
+    /// verification only; full 2-of-3 node attestation is an `end_session` event.
+    #[serde(default)]
+    pub verified_proof_count: u32,
+    /// Submitted proofs rejected by pre-filter validation (judged invalid).
+    #[serde(default)]
+    pub rejected_proof_count: u32,
 }
 
 /// Errors returned by the session store.
@@ -355,6 +362,62 @@ impl SessionStore {
         Ok(count.unwrap_or(0) as u32)
     }
 
+    /// Increments and returns the verified-proof counter for a session: proofs
+    /// that passed pre-filter validation. This is pre-filter verification only;
+    /// full 2-of-3 node attestation is a separate `end_session` event.
+    pub async fn increment_verified_proof_count(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<u32, SessionManagerError> {
+        self.incr_session_counter(&format!("verified_proof_count:{}", session_id.0))
+            .await
+    }
+
+    /// Returns the verified-proof counter for a session, or 0 when absent.
+    pub async fn get_verified_proof_count(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<u32, SessionManagerError> {
+        self.get_session_counter(&format!("verified_proof_count:{}", session_id.0))
+            .await
+    }
+
+    /// Increments and returns the rejected-proof counter for a session: proofs
+    /// judged invalid by pre-filter validation.
+    pub async fn increment_rejected_proof_count(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<u32, SessionManagerError> {
+        self.incr_session_counter(&format!("rejected_proof_count:{}", session_id.0))
+            .await
+    }
+
+    /// Returns the rejected-proof counter for a session, or 0 when absent.
+    pub async fn get_rejected_proof_count(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<u32, SessionManagerError> {
+        self.get_session_counter(&format!("rejected_proof_count:{}", session_id.0))
+            .await
+    }
+
+    async fn incr_session_counter(&self, key: &str) -> Result<u32, SessionManagerError> {
+        let mut conn = self.conn.clone();
+        let count: i64 = redis::cmd("INCR").arg(key).query_async(&mut conn).await?;
+        let _: () = redis::cmd("EXPIRE")
+            .arg(key)
+            .arg(TTL_SECS)
+            .query_async(&mut conn)
+            .await?;
+        Ok(count.max(0) as u32)
+    }
+
+    async fn get_session_counter(&self, key: &str) -> Result<u32, SessionManagerError> {
+        let mut conn = self.conn.clone();
+        let count: Option<i64> = redis::cmd("GET").arg(key).query_async(&mut conn).await?;
+        Ok(count.unwrap_or(0).max(0) as u32)
+    }
+
     /// Counts active sessions for a wallet by scanning matching keys.
     pub async fn get_active_session_count(
         &self,
@@ -420,6 +483,8 @@ impl SessionStore {
                 let session = SessionId(session_id.clone());
                 let last_submission_at = self.get_last_activity(&session).await?;
                 let avg_hashrate = self.get_average_hashrate(&session).await?;
+                let verified_proof_count = self.get_verified_proof_count(&session).await?;
+                let rejected_proof_count = self.get_rejected_proof_count(&session).await?;
                 summaries.push(SessionSummary {
                     session_id,
                     commodity: format!("{:?}", ctx.commodity),
@@ -431,6 +496,8 @@ impl SessionStore {
                     last_submission_at,
                     status: "active".to_string(),
                     cpu_threads: ctx.cpu_threads,
+                    verified_proof_count,
+                    rejected_proof_count,
                 });
             }
             cursor = next;
@@ -536,6 +603,21 @@ mod tests {
         let store = SessionStore::new(TEST_URL).await.unwrap();
         let id = SessionId("nonexistent-session-xyz".to_string());
         assert_eq!(store.get_proof_count(&id).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_verified_and_rejected_counters() {
+        let store = SessionStore::new(TEST_URL).await.unwrap();
+        let id = store.create_session(&sample_ctx()).await.unwrap();
+        assert_eq!(store.get_verified_proof_count(&id).await.unwrap(), 0);
+        assert_eq!(store.get_rejected_proof_count(&id).await.unwrap(), 0);
+        assert_eq!(store.increment_verified_proof_count(&id).await.unwrap(), 1);
+        assert_eq!(store.increment_verified_proof_count(&id).await.unwrap(), 2);
+        assert_eq!(store.increment_rejected_proof_count(&id).await.unwrap(), 1);
+        assert_eq!(store.get_verified_proof_count(&id).await.unwrap(), 2);
+        assert_eq!(store.get_rejected_proof_count(&id).await.unwrap(), 1);
+        store.delete_session(&Address::ZERO, &id).await.unwrap();
     }
 
     #[tokio::test]

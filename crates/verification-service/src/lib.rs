@@ -390,6 +390,19 @@ async fn submit_proof(
         if let Err(e) = state.session_manager.touch_last_activity(&session_id).await {
             tracing::warn!(error = %e, "failed to update last activity");
         }
+        if let Err(e) = state
+            .session_manager
+            .increment_verified_proof_count(&session_id)
+            .await
+        {
+            tracing::warn!(error = %e, "failed to increment verified proof count");
+        }
+    } else if let Err(e) = state
+        .session_manager
+        .increment_rejected_proof_count(&session_id)
+        .await
+    {
+        tracing::warn!(error = %e, "failed to increment rejected proof count");
     }
     state.session_manager.store_proof(&session_id, proof).await?;
 
