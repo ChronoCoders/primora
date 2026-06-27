@@ -106,11 +106,12 @@ pub struct EarningsRow {
     pub commodity: String,
     /// Number of proposals (sessions) recorded for this commodity.
     pub session_count: i64,
-    /// Summed gross PRM as a decimal string (NUMERIC SUM rendered as text).
+    /// Summed minted PRM in ERC-20 base-unit wei (NUMERIC SUM rendered as text);
+    /// human PRM = value / 10^18.
     pub total_gross_prm: String,
-    /// Gross USD value of the summed PRM in cents, at the fixed PRM reference
-    /// price (Spec 4.8, [`payout_calculator::prm_to_usd_cents`]). This is a
-    /// gross figure (the earnings endpoint is gross, before the house edge).
+    /// Net redemption USD earned, in cents: the sum of per-payout `net_usd_cents`
+    /// (TWAP redemption minus house edge, Spec 4.6). Rows predating the
+    /// `net_usd_cents` column (migration 0004) contribute 0.
     pub total_usd_cents: i64,
 }
 
@@ -258,16 +259,19 @@ impl PostgresStore {
 
     /// Returns a wallet's earnings aggregated by commodity. `wallet` must already
     /// be debug-formatted (`format!("{:?}", _)`) to match stored rows. The gross
-    /// PRM sum is cast to text to preserve full NUMERIC precision without
-    /// floating point. Earnings are aggregated across all chains (not split by
-    /// chain), matching the Overview mock's commodity-only breakdown.
+    /// PRM (wei) sum is cast to text to preserve full NUMERIC precision without
+    /// floating point; `total_usd_cents` is the summed net redemption USD
+    /// (`SUM(net_usd_cents)`, after the house edge), with NULLs counted as 0.
+    /// Earnings are aggregated across all chains (not split by chain), matching
+    /// the Overview mock's commodity-only breakdown.
     pub async fn get_earnings_by_commodity(
         &self,
         wallet: &str,
     ) -> Result<Vec<EarningsRow>, PostgresStoreError> {
         let rows = sqlx::query(
             "SELECT commodity, COUNT(*) AS session_count, \
-             COALESCE(SUM(gross_prm), 0)::text AS total_gross_prm \
+             COALESCE(SUM(gross_prm), 0)::text AS total_gross_prm, \
+             COALESCE(SUM(net_usd_cents), 0)::bigint AS total_usd_cents \
              FROM mint_proposals WHERE wallet = $1 GROUP BY commodity",
         )
         .bind(wallet)
@@ -276,15 +280,11 @@ impl PostgresStore {
 
         let mut earnings = Vec::with_capacity(rows.len());
         for row in rows {
-            let total_gross_prm: String = row.try_get("total_gross_prm")?;
-            let prm: u128 = total_gross_prm.parse().unwrap_or(0);
-            let total_usd_cents =
-                i64::try_from(payout_calculator::prm_to_usd_cents(prm)).unwrap_or(i64::MAX);
             earnings.push(EarningsRow {
                 commodity: row.try_get("commodity")?,
                 session_count: row.try_get("session_count")?,
-                total_gross_prm,
-                total_usd_cents,
+                total_gross_prm: row.try_get("total_gross_prm")?,
+                total_usd_cents: row.try_get("total_usd_cents")?,
             });
         }
         Ok(earnings)
@@ -437,25 +437,24 @@ mod tests {
     #[ignore]
     async fn test_get_earnings_by_commodity() {
         let store = store().await;
-        store
-            .insert_mint_proposal(&dummy_proposal("sess-earn", Chain::Ethereum))
-            .await
-            .unwrap();
-        let wallet = format!("{:?}", Address::ZERO);
+        let wallet_addr = Address::from([0xEEu8; 20]);
+        let mut a = dummy_proposal("sess-earn-a", Chain::Ethereum);
+        a.wallet = wallet_addr;
+        a.net_usd_cents = Some(1_531);
+        let mut b = dummy_proposal("sess-earn-b", Chain::Polygon);
+        b.wallet = wallet_addr;
+        b.net_usd_cents = Some(469);
+        store.insert_mint_proposal(&a).await.unwrap();
+        store.insert_mint_proposal(&b).await.unwrap();
+
+        let wallet = format!("{:?}", wallet_addr);
         let earnings = store.get_earnings_by_commodity(&wallet).await.unwrap();
-        assert!(earnings.iter().any(|e| e.commodity == "Gold"));
-        assert!(earnings.iter().all(|e| e.session_count >= 1));
-        assert!(earnings.iter().all(|e| e.total_gross_prm.parse::<u128>().is_ok()));
         let gold = earnings
             .iter()
             .find(|e| e.commodity == "Gold")
             .expect("gold earnings present");
-        assert_eq!(
-            gold.total_usd_cents,
-            i64::try_from(payout_calculator::prm_to_usd_cents(
-                gold.total_gross_prm.parse::<u128>().unwrap()
-            ))
-            .unwrap_or(i64::MAX)
-        );
+        assert_eq!(gold.session_count, 2);
+        assert!(gold.total_gross_prm.parse::<u128>().is_ok());
+        assert_eq!(gold.total_usd_cents, 2_000);
     }
 }

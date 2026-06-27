@@ -37,11 +37,17 @@ pub const PRM_REFERENCE_PRICE_8DEC: u128 = 10_000_000;
 /// Divisor rescaling an 8-decimal USD value to cents (2 decimals): `10^(8-2)`.
 const USD_8DEC_TO_CENTS: u128 = 1_000_000;
 
-/// Converts a PRM amount (plain PRM units as `u128`) to USD cents using the
+/// Converts a human PRM amount (whole PRM units as `u128`) to USD cents at the
 /// fixed reference price [`PRM_REFERENCE_PRICE_8DEC`] (Spec 4.8). Integer math
 /// only; no float.
 ///
-/// Scale: `prm_amount` (plain PRM) * [`PRM_REFERENCE_PRICE_8DEC`] yields USD at
+/// This is the reference-price *valuation* of PRM (`$0.10` per PRM), reserved for
+/// the reserve-ratio "circulating PRM value in USD" input. It is NOT the earnings
+/// figure: earnings report net commodity-redemption USD (`SUM(net_usd_cents)`),
+/// a different quantity. The input is human PRM (i.e. base-unit wei divided by
+/// `10^18`), never a calibration-scaled or wei value.
+///
+/// Scale: `prm_amount` (human PRM) * [`PRM_REFERENCE_PRICE_8DEC`] yields USD at
 /// 8-decimal precision (`prm * $0.10`); dividing by [`USD_8DEC_TO_CENTS`]
 /// (`10^6`) rescales that to cents. Examples: `1000 PRM -> $100.00 -> 10_000`
 /// cents; `148 PRM -> $14.80 -> 1_480` cents; `0 -> 0`.
