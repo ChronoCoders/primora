@@ -187,6 +187,10 @@ pub struct SessionContext {
     pub commodity: Commodity,
     /// The chain this session mints to, chosen at creation (Decision 4c).
     pub target_chain: Chain,
+    /// CPU worker threads reported by the client at session start. 0 if not
+    /// reported (older clients and stored sessions predating this field).
+    #[serde(default)]
+    pub cpu_threads: u32,
 }
 
 /// A partial proof submitted every 30s.

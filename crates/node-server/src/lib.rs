@@ -208,6 +208,7 @@ impl NodeService for NodeServiceImpl {
                 // Attestation is verification-only and never mints; the target
                 // chain is unused here, so default to the canonical chain.
                 target_chain: Chain::Ethereum,
+                cpu_threads: 0,
             };
             match validator.validate(&proof, ValidationMode::PreFilter, &ctx) {
                 ValidationResult::Invalid(reason) => {

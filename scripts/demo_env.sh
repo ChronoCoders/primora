@@ -17,6 +17,7 @@ NODE_KEY="0x0000000000000000000000000000000000000000000000000000000000000abc"
 ETH_RPC="http://localhost:8545"
 POLY_RPC="http://localhost:8546"
 SERVICE="http://localhost:3000"
+CPU_THREADS="$(nproc 2>/dev/null || echo 4)"
 REDIS_HOST_PORT="6380"
 
 STAKE_WEI="30000000000000000000000"          # 30,000 PRM
@@ -244,7 +245,7 @@ run_and_mint() {
   local commit sess sid pid
   commit=$(python3 -c "import hashlib; print(hashlib.sha256(bytes.fromhex('$nonce')).hexdigest())")
   sess=$(curl -s -X POST $SERVICE/sessions -H "Content-Type: application/json" \
-    -d "{\"wallet\":\"$ADDR0\",\"client_type\":\"desktop\",\"commodity\":\"$commodity\",\"chain\":\"$chain_name\",\"assigned_node_id\":\"node-a\",\"commit_hash\":\"$commit\"}")
+    -d "{\"wallet\":\"$ADDR0\",\"client_type\":\"desktop\",\"commodity\":\"$commodity\",\"chain\":\"$chain_name\",\"assigned_node_id\":\"node-a\",\"commit_hash\":\"$commit\",\"cpu_threads\":$CPU_THREADS}")
   sid=$(echo "$sess" | python3 -c "import json,sys; print(json.load(sys.stdin)['session_id'])")
   curl -s -X POST $SERVICE/sessions/$sid/proofs -H "Content-Type: application/json" \
     -d "{\"sequence\":1,\"hashrate\":2500,\"proof_hash\":\"$PROOF_HASH\",\"proof_input\":\"$PROOF_INPUT\",\"difficulty\":1}" > /dev/null
@@ -286,7 +287,7 @@ fi
 echo "=== 15. Leave one ACTIVE session (Gold/Ethereum, 3,842 H/s, NOT ended) ==="
 ACOMMIT=$(python3 -c "import hashlib; print(hashlib.sha256(bytes.fromhex('99')).hexdigest())")
 ASESS=$(curl -s -X POST $SERVICE/sessions -H "Content-Type: application/json" \
-  -d "{\"wallet\":\"$ADDR0\",\"client_type\":\"desktop\",\"commodity\":\"Gold\",\"chain\":\"ethereum\",\"assigned_node_id\":\"node-a\",\"commit_hash\":\"$ACOMMIT\"}")
+  -d "{\"wallet\":\"$ADDR0\",\"client_type\":\"desktop\",\"commodity\":\"Gold\",\"chain\":\"ethereum\",\"assigned_node_id\":\"node-a\",\"commit_hash\":\"$ACOMMIT\",\"cpu_threads\":$CPU_THREADS}")
 ASID=$(echo "$ASESS" | python3 -c "import json,sys; print(json.load(sys.stdin)['session_id'])")
 for seq in 1 2; do
   curl -s -X POST $SERVICE/sessions/$ASID/proofs -H "Content-Type: application/json" \

@@ -37,6 +37,8 @@ pub struct SessionSummary {
     pub last_submission_at: Option<DateTime<Utc>>,
     /// Session lifecycle status; a session present in Redis is active.
     pub status: String,
+    /// CPU worker threads for this session (0 if not reported).
+    pub cpu_threads: u32,
 }
 
 /// Errors returned by the session store.
@@ -428,6 +430,7 @@ impl SessionStore {
                     started_at: ctx.started_at,
                     last_submission_at,
                     status: "active".to_string(),
+                    cpu_threads: ctx.cpu_threads,
                 });
             }
             cursor = next;
@@ -486,6 +489,7 @@ mod tests {
             assigned_node_id: None,
             commodity: common::Commodity::Gold,
             target_chain: Chain::Polygon,
+            cpu_threads: 8,
         }
     }
 

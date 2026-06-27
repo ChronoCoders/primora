@@ -83,6 +83,10 @@ pub struct CreateSessionRequest {
     pub commodity: String,
     /// Target mint chain (Decision 4c): `ethereum` or `polygon`.
     pub chain: String,
+    /// Number of CPU worker threads the mining client is running. Defaults to 0
+    /// for older clients that do not report it.
+    #[serde(default)]
+    pub cpu_threads: u32,
 }
 
 /// Response body for a created session.
@@ -292,6 +296,7 @@ async fn create_session(
         assigned_node_id,
         commodity,
         target_chain,
+        cpu_threads: body.cpu_threads,
     };
     let session_id = state.session_manager.create_session(&ctx).await?;
     state

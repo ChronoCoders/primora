@@ -118,6 +118,7 @@ mod tests {
             assigned_node_id: None,
             commodity: common::Commodity::Gold,
             target_chain: common::Chain::Ethereum,
+            cpu_threads: 0,
         }
     }
 
