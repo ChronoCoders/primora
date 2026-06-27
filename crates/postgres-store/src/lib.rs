@@ -115,6 +115,19 @@ pub struct EarningsRow {
     pub total_usd_cents: i64,
 }
 
+/// A wallet's total earnings over the last 24 hours.
+#[derive(Debug, Clone, Serialize)]
+pub struct Earnings24h {
+    /// Total gross PRM minted in the last 24h, base-unit wei as a decimal string
+    /// (NUMERIC SUM rendered as text); human PRM = value / 10^18.
+    pub total_gross_prm: String,
+    /// Total net redemption USD in the last 24h, in cents (sum of per-payout
+    /// `net_usd_cents`, after the house edge; NULLs counted as 0).
+    pub total_usd_cents: i64,
+    /// Number of payouts in the 24h window.
+    pub payout_count: i64,
+}
+
 /// Postgres-backed store for anomaly events and mint proposals.
 pub struct PostgresStore {
     pool: sqlx::PgPool,
@@ -289,6 +302,31 @@ impl PostgresStore {
         }
         Ok(earnings)
     }
+
+    /// Returns a wallet's total earnings over the last 24 hours: summed gross PRM
+    /// (wei) and net redemption USD (cents). `wallet` must be debug-formatted
+    /// (`format!("{:?}", _)`) to match stored rows, identical to
+    /// [`PostgresStore::get_earnings_by_commodity`]. The window is
+    /// `created_at > now() - interval '24 hours'`; the gross sum is cast to text
+    /// to preserve full NUMERIC precision without floating point, and
+    /// `net_usd_cents` NULLs (pre-migration rows) count as 0.
+    pub async fn get_earnings_24h(&self, wallet: &str) -> Result<Earnings24h, PostgresStoreError> {
+        let row = sqlx::query(
+            "SELECT COALESCE(SUM(gross_prm), 0)::text AS total_gross_prm, \
+             COALESCE(SUM(net_usd_cents), 0)::bigint AS total_usd_cents, \
+             COUNT(*)::bigint AS payout_count \
+             FROM mint_proposals \
+             WHERE wallet = $1 AND created_at > now() - interval '24 hours'",
+        )
+        .bind(wallet)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(Earnings24h {
+            total_gross_prm: row.try_get("total_gross_prm")?,
+            total_usd_cents: row.try_get("total_usd_cents")?,
+            payout_count: row.try_get("payout_count")?,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -456,5 +494,28 @@ mod tests {
         assert_eq!(gold.session_count, 2);
         assert!(gold.total_gross_prm.parse::<u128>().is_ok());
         assert_eq!(gold.total_usd_cents, 2_000);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_get_earnings_24h_window() {
+        let store = store().await;
+        let wallet_addr = Address::from([0xABu8; 20]);
+        let mut recent = dummy_proposal("sess-24h-recent", Chain::Ethereum);
+        recent.wallet = wallet_addr;
+        recent.net_usd_cents = Some(1_531);
+        recent.created_at = Utc::now();
+        let mut old = dummy_proposal("sess-24h-old", Chain::Polygon);
+        old.wallet = wallet_addr;
+        old.net_usd_cents = Some(999);
+        old.created_at = Utc::now() - chrono::Duration::days(2);
+        store.insert_mint_proposal(&recent).await.unwrap();
+        store.insert_mint_proposal(&old).await.unwrap();
+
+        let wallet = format!("{:?}", wallet_addr);
+        let earnings = store.get_earnings_24h(&wallet).await.unwrap();
+        assert_eq!(earnings.payout_count, 1);
+        assert_eq!(earnings.total_usd_cents, 1_531);
+        assert_eq!(earnings.total_gross_prm, "18000000000000000000000");
     }
 }

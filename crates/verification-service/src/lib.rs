@@ -835,6 +835,18 @@ async fn wallet_earnings(
     Ok(Json(rows))
 }
 
+/// Returns a wallet's total earnings over the last 24 hours: gross PRM (wei
+/// decimal string) and net redemption USD (cents). Backs the PRM Earned (24h) KPI.
+async fn wallet_earnings_24h(
+    State(state): State<AppState>,
+    Path(wallet): Path<String>,
+) -> Result<Json<postgres_store::Earnings24h>, ApiError> {
+    let address = parse_wallet(&wallet)?;
+    let key = wallet_db_key(&address);
+    let earnings = state.postgres_store.get_earnings_24h(&key).await?;
+    Ok(Json(earnings))
+}
+
 /// Returns a wallet's active sessions. Redis session keys use the address
 /// Display form (see `SessionStore::create_session`), distinct from the
 /// debug-formatted wallet persisted in Postgres.
@@ -885,6 +897,7 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions/:session_id/end", post(end_session))
         .route("/wallets/:wallet/payouts", get(wallet_payouts))
         .route("/wallets/:wallet/earnings", get(wallet_earnings))
+        .route("/wallets/:wallet/earnings/24h", get(wallet_earnings_24h))
         .route("/wallets/:wallet/sessions", get(wallet_sessions))
         .route("/wallets/:wallet/staking", get(wallet_staking))
         .route("/health", get(health_check))
