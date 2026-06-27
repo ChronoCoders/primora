@@ -343,6 +343,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_net_so_far_composition_matches_calculate_payout() {
+        let config = default_config();
+        let base_gross = calculate_gross_prm(2500, 28800, &config, &Commodity::Gold);
+        let unboosted = apply_staking_boost(base_gross, 0);
+        let result =
+            calculate_payout_from_gross(unboosted, 320_400_000_000, &Commodity::Gold, &config);
+        assert_eq!(result.net_usdc_scaled, 15_317_683);
+
+        let boosted = apply_staking_boost(base_gross, 4_000);
+        let result_boosted =
+            calculate_payout_from_gross(boosted, 320_400_000_000, &Commodity::Gold, &config);
+        assert!(result_boosted.net_usdc_scaled > result.net_usdc_scaled);
+    }
+
     const E18: u128 = 1_000_000_000_000_000_000;
 
     #[test]

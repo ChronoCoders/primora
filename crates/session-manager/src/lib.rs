@@ -46,6 +46,12 @@ pub struct SessionSummary {
     /// Submitted proofs rejected by pre-filter validation (judged invalid).
     #[serde(default)]
     pub rejected_proof_count: u32,
+    /// Net USD (cents) this session has earned so far: grounded in elapsed time,
+    /// average hashrate, live TWAP, staking boost, and the 17% house edge. Not a
+    /// full-day projection. Populated by the service layer; 0 until then or when
+    /// no TWAP price is available yet.
+    #[serde(default)]
+    pub est_net_usd_cents: i64,
 }
 
 /// Errors returned by the session store.
@@ -498,6 +504,7 @@ impl SessionStore {
                     cpu_threads: ctx.cpu_threads,
                     verified_proof_count,
                     rejected_proof_count,
+                    est_net_usd_cents: 0,
                 });
             }
             cursor = next;

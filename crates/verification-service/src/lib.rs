@@ -874,7 +874,39 @@ async fn wallet_sessions(
 ) -> Result<Json<Vec<session_manager::SessionSummary>>, ApiError> {
     let address = parse_wallet(&wallet)?;
     let key = address.to_string();
-    let rows = state.session_manager.list_sessions_for_wallet(&key).await?;
+    let mut rows = state.session_manager.list_sessions_for_wallet(&key).await?;
+    if !rows.is_empty() {
+        let boost_bps = staking_summary(&state, address).await.effective_boost_bps;
+        let payout_config = payout_calculator::default_config();
+        let now = Utc::now();
+        let twap_map = state.twap_sessions.read().await;
+        for row in &mut rows {
+            let elapsed_secs = (now - row.started_at).num_seconds().max(0) as u64;
+            if elapsed_secs == 0 || row.avg_hashrate == 0 {
+                continue;
+            }
+            let Some(twap_price) = twap_map.get(&row.session_id).and_then(|c| c.calculate()) else {
+                continue;
+            };
+            let commodity = parse_commodity(&row.commodity);
+            let base_gross = payout_calculator::calculate_gross_prm(
+                row.avg_hashrate,
+                elapsed_secs,
+                &payout_config,
+                &commodity,
+            );
+            let boosted_gross = payout_calculator::apply_staking_boost(base_gross, boost_bps);
+            let payout = payout_calculator::calculate_payout_from_gross(
+                boosted_gross,
+                twap_price,
+                &commodity,
+                &payout_config,
+            );
+            if let Ok(cents) = i64::try_from(payout.net_usdc_scaled / NET_USDC_SCALE_TO_CENTS) {
+                row.est_net_usd_cents = cents;
+            }
+        }
+    }
     Ok(Json(rows))
 }
 
