@@ -16,6 +16,19 @@ const USDC_SCALE: u128 = 1_000_000;
 /// Basis-point denominator (`10_000` bps = `100%`).
 const BPS_DENOMINATOR: u128 = 10_000;
 
+/// Factor converting a calibration-scaled gross PRM value (human PRM x 10^5, the
+/// internal redemption-input scale produced by [`calculate_gross_prm`]) to ERC-20
+/// base units (human PRM x 10^18). `10^18 / 10^5 = 10^13`.
+pub const GROSS_CALIB_TO_WEI: u128 = 10_000_000_000_000;
+
+/// Converts a calibration-scaled gross PRM value to ERC-20 base units (wei).
+/// `gross_calib` is human PRM x 10^5; the result is human PRM x 10^18. Uses
+/// checked multiplication, saturating to `u128::MAX` on overflow (guarded, though
+/// realistic sessions stay far inside `u128`).
+pub fn gross_calib_to_wei(gross_calib: u128) -> u128 {
+    gross_calib.saturating_mul(GROSS_CALIB_TO_WEI)
+}
+
 /// Fixed PRM reference price in USD, scaled to 8 decimals (Spec 4.8).
 /// `$0.10` per PRM = `10_000_000`. Used for all PRM->USD conversions until PRM
 /// trades on a market, at which point this is replaced by the real price.
@@ -251,6 +264,13 @@ mod tests {
         assert_eq!(prm_to_usd_cents(1000), 10_000);
         assert_eq!(prm_to_usd_cents(148), 1_480);
         assert_eq!(prm_to_usd_cents(0), 0);
+    }
+
+    #[test]
+    fn test_gross_calib_to_wei() {
+        assert_eq!(gross_calib_to_wei(1_800_000_000), 18_000 * 10u128.pow(18));
+        assert_eq!(gross_calib_to_wei(187_500), 1_875 * 10u128.pow(15));
+        assert_eq!(gross_calib_to_wei(0), 0);
     }
 
     #[test]

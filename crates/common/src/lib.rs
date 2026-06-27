@@ -278,7 +278,7 @@ pub struct MintProposal {
     pub session_id: SessionId,
     /// Recipient wallet.
     pub wallet: Address,
-    /// Gross PRM as a scaled integer.
+    /// Minted PRM in ERC-20 base units (18 decimals). Human PRM = `gross_prm / 10^18`.
     pub gross_prm: u128,
     /// Net payout in USD cents (redemption minus house edge, Spec 4.6). `None`
     /// for proposals created before USD figures were persisted (Spec 4.8 wiring).

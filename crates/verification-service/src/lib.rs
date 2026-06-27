@@ -731,21 +731,23 @@ async fn end_session(
                 &ctx.commodity,
                 &payout_config,
             );
-            let gross_prm = payout_result.gross_prm;
+            let mint_amount_wei = payout_calculator::gross_calib_to_wei(boosted_gross);
             let net_usd_cents = i64::try_from(payout_result.net_usdc_scaled / NET_USDC_SCALE_TO_CENTS).ok();
             tracing::info!(
                 session_id = %session_id.0,
-                gross_prm = %payout_result.gross_prm,
+                gross_calib = %boosted_gross,
+                mint_amount_wei = %mint_amount_wei,
                 redemption_usd_scaled = %payout_result.redemption_usd_scaled,
                 net_usdc_scaled = %payout_result.net_usdc_scaled,
+                net_usd_cents = ?net_usd_cents,
                 house_edge_bps = %payout_result.house_edge_bps,
-                "payout calculated"
+                "payout computed (mint amount in base units)"
             );
 
             let mut proposal = MintProposal {
                 session_id: session_id.clone(),
                 wallet: ctx.wallet,
-                gross_prm,
+                gross_prm: mint_amount_wei,
                 net_usd_cents,
                 commodity: ctx.commodity,
                 chain: ctx.target_chain,
