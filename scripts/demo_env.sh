@@ -295,13 +295,25 @@ done
 echo "active session $ASID left running (avg 3,842 H/s, Gold, ethereum)"
 
 echo "=== 16. Frontend .env.local ==="
+# A real WalletConnect projectId is required: an invalid/placeholder id makes
+# RainbowKit/WalletConnect throw Object.values on the explorer response and blocks
+# the whole page. Never clobber a configured id on re-run. Precedence:
+#   WC_PROJECT_ID env var > existing .env.local value (if real) > project default.
+WC_PROJECT_ID_DEFAULT="dcf0b8a7d17d7bbecf432afbba050a8e"
+WC_PROJECT_ID="${WC_PROJECT_ID:-}"
+if [ -z "$WC_PROJECT_ID" ] && [ -f "$FRONTEND/.env.local" ]; then
+  WC_PROJECT_ID="$(grep -E '^NEXT_PUBLIC_WC_PROJECT_ID=' "$FRONTEND/.env.local" | tail -1 | cut -d= -f2-)"
+fi
+case "$WC_PROJECT_ID" in
+  ""|PRIMORA_DEMO|PRIMORA_DEV_PLACEHOLDER) WC_PROJECT_ID="$WC_PROJECT_ID_DEFAULT" ;;
+esac
 cat > "$FRONTEND/.env.local" <<ENV
 NEXT_PUBLIC_USE_LOCAL_CHAINS=true
 BACKEND_ORIGIN=http://localhost:3000
 NEXT_PUBLIC_CHAIN_ID=1
-NEXT_PUBLIC_WC_PROJECT_ID=PRIMORA_DEMO
+NEXT_PUBLIC_WC_PROJECT_ID=$WC_PROJECT_ID
 ENV
-echo "wrote $FRONTEND/.env.local (gitignored)"
+echo "wrote $FRONTEND/.env.local (gitignored, WalletConnect projectId preserved)"
 
 PAYOUT_COUNT=$($PSQL -t -A -c "SELECT COUNT(*) FROM mint_proposals;" 2>/dev/null | tr -d '[:space:]')
 
