@@ -21,6 +21,13 @@ pub struct SessionSummary {
     pub commodity: String,
     /// Number of proofs counted for the session.
     pub proof_count: u32,
+    /// Average hashrate over the session so far (H/s), derived from proof
+    /// submissions. This is a running average, not an instantaneous rate; it is
+    /// 0 until the first proof is counted.
+    pub avg_hashrate: u64,
+    /// The client software type for this session (lowercase, e.g. `desktop`),
+    /// from the stored session context.
+    pub client_type: String,
     /// The chain this session mints to.
     pub target_chain: Chain,
     /// UTC timestamp when the session was created.
@@ -410,10 +417,13 @@ impl SessionStore {
                     redis::cmd("GET").arg(&count_key).query_async(&mut conn).await?;
                 let session = SessionId(session_id.clone());
                 let last_submission_at = self.get_last_activity(&session).await?;
+                let avg_hashrate = self.get_average_hashrate(&session).await?;
                 summaries.push(SessionSummary {
                     session_id,
                     commodity: format!("{:?}", ctx.commodity),
                     proof_count: count.unwrap_or(0).max(0) as u32,
+                    avg_hashrate,
+                    client_type: format!("{:?}", ctx.client_type).to_lowercase(),
                     target_chain: ctx.target_chain,
                     started_at: ctx.started_at,
                     last_submission_at,
@@ -548,6 +558,8 @@ mod tests {
         assert_eq!(summary.started_at, ctx.started_at);
         assert_eq!(summary.target_chain, Chain::Polygon);
         assert!(summary.last_submission_at.is_none());
+        assert_eq!(summary.avg_hashrate, 0);
+        assert_eq!(summary.client_type, "cli");
 
         let before = Utc::now().timestamp();
         store.touch_last_activity(&id).await.unwrap();
