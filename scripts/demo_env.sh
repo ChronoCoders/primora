@@ -50,9 +50,9 @@ YML
 docker compose -f docker-compose.yml -f "$OVERRIDE" up -d postgres redis
 sleep 5
 
-echo "=== 2. Two Anvil: :8545 (chain 1, Ethereum), :8546 (chain 137, Polygon) ==="
-nohup anvil --chain-id 1   --port 8545 > /tmp/demo_anvil_eth.log  2>&1 &
-nohup anvil --chain-id 137 --port 8546 > /tmp/demo_anvil_poly.log 2>&1 &
+echo "=== 2. Two Anvil: :8545 (chain 31337, Ethereum-local), :8546 (chain 31338, Polygon-local) ==="
+nohup anvil --chain-id 31337 --port 8545 > /tmp/demo_anvil_eth.log  2>&1 &
+nohup anvil --chain-id 31338 --port 8546 > /tmp/demo_anvil_poly.log 2>&1 &
 sleep 3
 echo "Ethereum chain-id: $(cast chain-id --rpc-url $ETH_RPC)"
 echo "Polygon  chain-id: $(cast chain-id --rpc-url $POLY_RPC)"
@@ -110,8 +110,8 @@ with open(path, "w") as f:
 print(f"wrote {path}")
 PY
 }
-write_frontend "$FRONTEND/lib/deployments/local.json"   1   "$ETH_PRIM"  "$ETH_HOUSE"  "$ETH_ORACLE"  "$ETH_TREASURY"  "$ETH_NODEREG"  "$ETH_STAKING"  "$ETH_MINING"
-write_frontend "$FRONTEND/lib/deployments/polygon.json" 137 "$POLY_PRIM" "$POLY_HOUSE" "$POLY_ORACLE" "$POLY_TREASURY" "$POLY_NODEREG" "$POLY_STAKING" "$POLY_MINING"
+write_frontend "$FRONTEND/lib/deployments/local.json"   31337 "$ETH_PRIM"  "$ETH_HOUSE"  "$ETH_ORACLE"  "$ETH_TREASURY"  "$ETH_NODEREG"  "$ETH_STAKING"  "$ETH_MINING"
+write_frontend "$FRONTEND/lib/deployments/polygon.json" 31338 "$POLY_PRIM" "$POLY_HOUSE" "$POLY_ORACLE" "$POLY_TREASURY" "$POLY_NODEREG" "$POLY_STAKING" "$POLY_MINING"
 
 echo "=== 5. Submit TWAP prices to BOTH OracleAggregators (all four commodities) ==="
 # Gold/Silver use the on-chain Chainlink MOCK feeds (fixed). Platinum/CrudeOil
@@ -202,7 +202,7 @@ echo "=== 11. Start verification-service (full dual-chain config) ==="
 DATABASE_URL="postgres://primora:primora_dev@localhost:5432/primora" \
 REDIS_URL="redis://localhost:${REDIS_HOST_PORT}" \
 BIND_ADDR="0.0.0.0:3000" \
-CHAIN_ID="1" \
+CHAIN_ID="31337" \
 RPC_URL="$ETH_RPC" \
 CHAINLINK_XAU_ADDRESS="$ETH_XAU" \
 CHAINLINK_XAG_ADDRESS="$ETH_XAG" \
@@ -310,7 +310,7 @@ esac
 cat > "$FRONTEND/.env.local" <<ENV
 NEXT_PUBLIC_USE_LOCAL_CHAINS=true
 BACKEND_ORIGIN=http://localhost:3000
-NEXT_PUBLIC_CHAIN_ID=1
+NEXT_PUBLIC_CHAIN_ID=31337
 NEXT_PUBLIC_WC_PROJECT_ID=$WC_PROJECT_ID
 ENV
 echo "wrote $FRONTEND/.env.local (gitignored, WalletConnect projectId preserved)"
@@ -323,16 +323,16 @@ cat <<BANNER
   PRIMORA ENVIRONMENT READY  (persistent -- still running)
 ==================================================================
   Backend API : http://localhost:3000   (health: $(curl -s $SERVICE/health))
-  Ethereum RPC: http://localhost:8545    (chain-id 1)
-  Polygon  RPC: http://localhost:8546    (chain-id 137)
+  Ethereum RPC: http://localhost:8545    (chain-id 31337)
+  Polygon  RPC: http://localhost:8546    (chain-id 31338)
 
   Demo user   : $ADDR0
   Private key : $KEY0
                 (well-known Anvil account 0 -- import into MetaMask)
 
   ---- MetaMask setup ----
-  Add network "Ethereum-local": RPC http://localhost:8545, Chain ID 1,   Symbol ETH
-  Add network "Polygon-local" : RPC http://localhost:8546, Chain ID 137, Symbol POL
+  Add network "Ethereum-local": RPC http://localhost:8545, Chain ID 31337, Symbol ETH
+  Add network "Polygon-local" : RPC http://localhost:8546, Chain ID 31338, Symbol POL
   Import account using the private key above.
 
   ---- Start the frontend ----
