@@ -3346,7 +3346,6 @@ dependencies = [
  "alloy-primitives",
  "chrono",
  "common",
- "payout-calculator",
  "serde",
  "serde_json",
  "sqlx",
