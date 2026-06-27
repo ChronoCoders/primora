@@ -1,0 +1,350 @@
+#!/usr/bin/env bash
+# Primora LIVE DEMO ENVIRONMENT (persistent -- does NOT tear down).
+# Stands up the full dual-chain stack, seeds realistic data, and leaves everything
+# running so the Overview page can be viewed in a browser with MetaMask.
+# Stop it later with: scripts/demo_env_stop.sh
+set -uo pipefail
+
+BACKEND_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$BACKEND_ROOT"
+FRONTEND="$BACKEND_ROOT/../primora-frontend"
+
+KEY0="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+ADDR0="0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+SIGNER1_KEY="0x0000000000000000000000000000000000000000000000000000000000000001"
+SIGNER2_KEY="0x0000000000000000000000000000000000000000000000000000000000000002"
+NODE_KEY="0x0000000000000000000000000000000000000000000000000000000000000abc"
+ETH_RPC="http://localhost:8545"
+POLY_RPC="http://localhost:8546"
+SERVICE="http://localhost:3000"
+REDIS_HOST_PORT="6380"
+
+STAKE_WEI="30000000000000000000000"          # 30,000 PRM
+POLY_MIN_STAKE="100000000000000000000"        # 100 PRM
+RESERVE_USDC="5040000000"                     # $5,040 (6-dec) -> ~Healthy reserve ratio
+
+DB_USER="primora"
+DB_NAME="primora"
+PSQL="docker compose exec -T postgres psql -U $DB_USER -d $DB_NAME"
+
+note() { echo "  - $1"; }
+
+echo "=================================================================="
+echo " PRIMORA DEMO ENVIRONMENT -- starting (persistent, no teardown)"
+echo "=================================================================="
+
+echo "=== 0. Kill any prior anvil / node / backend ==="
+pkill -f primora-node 2>/dev/null || true
+pkill -f primora-verification 2>/dev/null || true
+pkill -f anvil 2>/dev/null || true
+sleep 1
+
+echo "=== 1. Infra: Postgres + Redis (Redis on ${REDIS_HOST_PORT}) ==="
+OVERRIDE="$(mktemp /tmp/primora-demo-override.XXXXXX.yml)"
+cat > "$OVERRIDE" <<YML
+services:
+  redis:
+    ports: !override
+      - "${REDIS_HOST_PORT}:6379"
+YML
+docker compose -f docker-compose.yml -f "$OVERRIDE" up -d postgres redis
+sleep 5
+
+echo "=== 2. Two Anvil: :8545 (chain 1, Ethereum), :8546 (chain 137, Polygon) ==="
+nohup anvil --chain-id 1   --port 8545 > /tmp/demo_anvil_eth.log  2>&1 &
+nohup anvil --chain-id 137 --port 8546 > /tmp/demo_anvil_poly.log 2>&1 &
+sleep 3
+echo "Ethereum chain-id: $(cast chain-id --rpc-url $ETH_RPC)"
+echo "Polygon  chain-id: $(cast chain-id --rpc-url $POLY_RPC)"
+
+echo "=== 3. Deploy full suite to BOTH chains ==="
+cd contracts
+forge script script/Deploy.s.sol:DeployScript --rpc-url $ETH_RPC --private-key $KEY0 --broadcast > /tmp/demo_deploy_eth.log 2>&1
+cp deployments/local.json /tmp/demo_eth.json
+STAKING_MIN_STAKE="$POLY_MIN_STAKE" STAKING_LOCK_REQUIRED=false \
+  forge script script/Deploy.s.sol:DeployScript --rpc-url $POLY_RPC --private-key $KEY0 --broadcast > /tmp/demo_deploy_poly.log 2>&1
+cp deployments/local.json /tmp/demo_poly.json
+cd "$BACKEND_ROOT"
+
+addr() { python3 -c "import json; print(json.load(open('$1'))['$2'])"; }
+ETH_PRIM=$(addr /tmp/demo_eth.json PrimToken)
+ETH_HOUSE=$(addr /tmp/demo_eth.json HouseEdge)
+ETH_ORACLE=$(addr /tmp/demo_eth.json OracleAggregator)
+ETH_TREASURY=$(addr /tmp/demo_eth.json Treasury)
+ETH_NODEREG=$(addr /tmp/demo_eth.json NodeRegistry)
+ETH_STAKING=$(addr /tmp/demo_eth.json StakingContract)
+ETH_MINING=$(addr /tmp/demo_eth.json MiningContract)
+ETH_USDC=$(addr /tmp/demo_eth.json MockUSDC)
+ETH_XAU=$(addr /tmp/demo_eth.json MockXAUFeed)
+ETH_XAG=$(addr /tmp/demo_eth.json MockXAGFeed)
+
+POLY_PRIM=$(addr /tmp/demo_poly.json PrimToken)
+POLY_HOUSE=$(addr /tmp/demo_poly.json HouseEdge)
+POLY_ORACLE=$(addr /tmp/demo_poly.json OracleAggregator)
+POLY_TREASURY=$(addr /tmp/demo_poly.json Treasury)
+POLY_NODEREG=$(addr /tmp/demo_poly.json NodeRegistry)
+POLY_STAKING=$(addr /tmp/demo_poly.json StakingContract)
+POLY_MINING=$(addr /tmp/demo_poly.json MiningContract)
+echo "ETH  Prim=$ETH_PRIM Oracle=$ETH_ORACLE Staking=$ETH_STAKING Mining=$ETH_MINING Treasury=$ETH_TREASURY"
+echo "POLY Prim=$POLY_PRIM Oracle=$POLY_ORACLE Staking=$POLY_STAKING Mining=$POLY_MINING"
+
+echo "=== 4. Write addresses to the frontend deployment files ==="
+write_frontend() {
+  python3 - "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" <<'PY'
+import json, sys
+path, chain_id, prim, house, oracle, treasury, nodereg, staking, mining = sys.argv[1:10]
+data = {
+    "_comment": f"Local Anvil (chainId {chain_id}) addresses written by scripts/demo_env.sh.",
+    "chainId": int(chain_id),
+    "primToken": prim,
+    "houseEdge": house,
+    "oracleAggregator": oracle,
+    "treasury": treasury,
+    "nodeRegistry": nodereg,
+    "stakingContract": staking,
+    "miningContract": mining,
+}
+with open(path, "w") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+print(f"wrote {path}")
+PY
+}
+write_frontend "$FRONTEND/lib/deployments/local.json"   1   "$ETH_PRIM"  "$ETH_HOUSE"  "$ETH_ORACLE"  "$ETH_TREASURY"  "$ETH_NODEREG"  "$ETH_STAKING"  "$ETH_MINING"
+write_frontend "$FRONTEND/lib/deployments/polygon.json" 137 "$POLY_PRIM" "$POLY_HOUSE" "$POLY_ORACLE" "$POLY_TREASURY" "$POLY_NODEREG" "$POLY_STAKING" "$POLY_MINING"
+
+echo "=== 5. Submit TWAP prices to BOTH OracleAggregators (all four commodities) ==="
+# Gold/Silver use the on-chain Chainlink MOCK feeds (fixed). Platinum/CrudeOil
+# read REAL prices from Pyth Hermes (off-chain HTTP; backend has internet), the
+# same source the verification-service samples for those commodities.
+PYTH_XPT_ID="398e4bbc7cbf89d6648c21e08019d878967677753b3096799595c78f805a34e5"
+PYTH_WTI_ID="05e7c9b556df67e455c52ea2d31658744e3f4ade60db7dab887008844f2ae472"
+hermes_8dec() {
+  curl -s "https://hermes.pyth.network/v2/updates/price/latest?ids[]=$1" 2>/dev/null | python3 -c "
+import json,sys
+try:
+    a=json.load(sys.stdin).get('parsed',[])
+except Exception:
+    print(''); sys.exit(0)
+if not a: print(''); sys.exit(0)
+p=a[0]['price']; price=int(p['price']); k=8+int(p['expo'])
+print(price*10**k if k>=0 else price//10**(-k))
+"
+}
+XPT_8DEC=$(hermes_8dec "$PYTH_XPT_ID")
+WTI_8DEC=$(hermes_8dec "$PYTH_WTI_ID")
+echo "Hermes XPT(8dec)=${XPT_8DEC:-UNAVAILABLE}  WTI(8dec)=${WTI_8DEC:-UNAVAILABLE}"
+
+submit_prices() {
+  local rpc="$1" oracle="$2"
+  cast send "$oracle" "submitPrice(uint8,uint256)" 0 320400000000 --private-key $KEY0 --rpc-url "$rpc" > /dev/null  # Gold $3204 (mock)
+  cast send "$oracle" "submitPrice(uint8,uint256)" 2 3180000000   --private-key $KEY0 --rpc-url "$rpc" > /dev/null  # Silver $31.80 (mock)
+  [ -n "$XPT_8DEC" ] && cast send "$oracle" "submitPrice(uint8,uint256)" 1 "$XPT_8DEC" --private-key $KEY0 --rpc-url "$rpc" > /dev/null  # Platinum (live Hermes)
+  [ -n "$WTI_8DEC" ] && cast send "$oracle" "submitPrice(uint8,uint256)" 3 "$WTI_8DEC" --private-key $KEY0 --rpc-url "$rpc" > /dev/null  # CrudeOil (live Hermes)
+  return 0
+}
+submit_prices "$ETH_RPC"  "$ETH_ORACLE"  && echo "Ethereum oracle prices submitted"
+submit_prices "$POLY_RPC" "$POLY_ORACLE" && echo "Polygon oracle prices submitted"
+
+# TEST-ONLY PRM funding: temporarily point the minter at the deployer to mint
+# stakeable PRM, then restore the MiningContract as minter (not production).
+fund_prm() {
+  local rpc="$1" prim="$2" mining="$3"
+  cast send "$prim" "setMinter(address)" "$ADDR0" --private-key $KEY0 --rpc-url "$rpc" > /dev/null
+  cast send "$prim" "mint(address,uint256)" "$ADDR0" "$STAKE_WEI" --private-key $KEY0 --rpc-url "$rpc" > /dev/null
+  cast send "$prim" "setMinter(address)" "$mining" --private-key $KEY0 --rpc-url "$rpc" > /dev/null
+}
+
+echo "=== 6a. Stake 30,000 PRM on ETHEREUM (180-day lock = ordinal 2) ==="
+fund_prm "$ETH_RPC" "$ETH_PRIM" "$ETH_MINING"
+cast send "$ETH_PRIM" "approve(address,uint256)" "$ETH_STAKING" "$STAKE_WEI" --private-key $KEY0 --rpc-url $ETH_RPC > /dev/null
+cast send "$ETH_STAKING" "stake(uint256,uint8)" "$STAKE_WEI" 2 --private-key $KEY0 --rpc-url $ETH_RPC > /dev/null
+echo "ETH stake active: $(cast call $ETH_STAKING 'stakes(address)(uint256,uint8,uint256,uint256,bool)' $ADDR0 --rpc-url $ETH_RPC | tail -1)"
+
+echo "=== 6b. Stake 30,000 PRM on POLYGON (no lock) ==="
+fund_prm "$POLY_RPC" "$POLY_PRIM" "$POLY_MINING"
+cast send "$POLY_PRIM" "approve(address,uint256)" "$POLY_STAKING" "$STAKE_WEI" --private-key $KEY0 --rpc-url $POLY_RPC > /dev/null
+cast send "$POLY_STAKING" "stake(uint256,uint8)" "$STAKE_WEI" 0 --private-key $KEY0 --rpc-url $POLY_RPC > /dev/null
+echo "POLY stake active: $(cast call $POLY_STAKING 'stakes(address)(uint256,uint8,uint256,uint256,bool)' $ADDR0 --rpc-url $POLY_RPC | tail -1)"
+
+echo "=== 7. Deposit reserves into the ETHEREUM Treasury (\$5,040 USDC) ==="
+RESERVE_OK="skipped"
+if cast send "$ETH_USDC" "mint(address,uint256)" "$ADDR0" "$RESERVE_USDC" --private-key $KEY0 --rpc-url $ETH_RPC > /dev/null 2>&1 \
+  && cast send "$ETH_USDC" "approve(address,uint256)" "$ETH_TREASURY" "$RESERVE_USDC" --private-key $KEY0 --rpc-url $ETH_RPC > /dev/null 2>&1 \
+  && cast send "$ETH_TREASURY" "depositReserve(address,uint256)" "$ETH_USDC" "$RESERVE_USDC" --private-key $KEY0 --rpc-url $ETH_RPC > /dev/null 2>&1; then
+  RESERVE_OK="deposited \$5,040 (vs ~\$3,000 circulating-PRM value -> ~168% ratio, Healthy)"
+  echo "reserves: $RESERVE_OK"
+else
+  echo "reserves: deposit FAILED -- Reserve Health will show its honest state"
+fi
+
+echo "=== 8. Build node-server, verification-service, admin-cli, gen_proof ==="
+cargo build -p node-server --bin primora-node 2>&1 | tail -1
+cargo build -p verification-service --bin primora-verification 2>&1 | tail -1
+cargo build -p admin-cli --bin primora-admin 2>&1 | tail -1
+cargo build -q -p randomx-verifier --example gen_proof 2>&1 | tail -1
+
+echo "=== 9. Generate a VALID RandomX proof ==="
+GEN=$(cargo run -q -p randomx-verifier --example gen_proof -- "primora-demo")
+PROOF_INPUT=$(echo "$GEN" | sed -n '1p')
+PROOF_HASH=$(echo "$GEN" | sed -n '2p')
+echo "proof_input=$PROOF_INPUT proof_hash=$PROOF_HASH"
+
+echo "=== 10. Start node-server (real attestation) ==="
+BIND_ADDR="127.0.0.1:50051" NODE_API_KEY="devkey" NODE_SIGNING_KEY_HEX="${NODE_KEY#0x}" NODE_ID="node-demo" LOG_LEVEL="info" \
+  nohup ./target/debug/primora-node > /tmp/demo_node.log 2>&1 &
+for i in $(seq 1 60); do
+  grep -q "primora node starting" /tmp/demo_node.log 2>/dev/null && { echo "node ready"; break; }
+  sleep 1
+done
+
+echo "=== 11. Start verification-service (full dual-chain config) ==="
+DATABASE_URL="postgres://primora:primora_dev@localhost:5432/primora" \
+REDIS_URL="redis://localhost:${REDIS_HOST_PORT}" \
+BIND_ADDR="0.0.0.0:3000" \
+CHAIN_ID="1" \
+RPC_URL="$ETH_RPC" \
+CHAINLINK_XAU_ADDRESS="$ETH_XAU" \
+CHAINLINK_XAG_ADDRESS="$ETH_XAG" \
+SIGNING_KEY_HEX="0000000000000000000000000000000000000000000000000000000000000001" \
+ETHEREUM_RPC_URL="$ETH_RPC" \
+ETHEREUM_ORACLE_SUBMITTER_KEY_HEX="${KEY0#0x}" \
+ETHEREUM_ORACLE_AGGREGATOR_ADDRESS="$ETH_ORACLE" \
+ETHEREUM_STAKING_ADDRESS="$ETH_STAKING" \
+POLYGON_RPC_URL="$POLY_RPC" \
+POLYGON_ORACLE_SUBMITTER_KEY_HEX="${KEY0#0x}" \
+POLYGON_ORACLE_AGGREGATOR_ADDRESS="$POLY_ORACLE" \
+POLYGON_STAKING_ADDRESS="$POLY_STAKING" \
+NODE_ENDPOINTS="http://localhost:50051" \
+NODE_API_KEY="devkey" \
+LOG_LEVEL="info" \
+  nohup ./target/debug/primora-verification > /tmp/demo_backend.log 2>&1 &
+sleep 5
+echo "health: $(curl -s $SERVICE/health)"
+
+echo "=== 12. Clean stale payout rows from prior runs ==="
+$PSQL -c "TRUNCATE mint_proposals, anomaly_events RESTART IDENTITY;" > /dev/null 2>&1 && echo "tables truncated" || echo "(truncate skipped -- tables may be fresh)"
+
+# admin-cli per-chain env (both chains; propose auto-routes by the DB row).
+export ETHEREUM_RPC_URL="$ETH_RPC" ETHEREUM_MINING_CONTRACT_ADDRESS="$ETH_MINING" ETHEREUM_ADMIN_KEY_HEX="${KEY0#0x}"
+export POLYGON_RPC_URL="$POLY_RPC" POLYGON_MINING_CONTRACT_ADDRESS="$POLY_MINING" POLYGON_ADMIN_KEY_HEX="${KEY0#0x}"
+export DATABASE_URL="postgres://primora:primora_dev@localhost:5432/primora"
+ADMIN="./target/debug/primora-admin"
+
+# Fund the integer-key signer addresses for gas on both chains.
+S1=$(cast wallet address --private-key $SIGNER1_KEY); S2=$(cast wallet address --private-key $SIGNER2_KEY)
+for RPC in $ETH_RPC $POLY_RPC; do
+  cast send $S1 --value 1ether --private-key $KEY0 --rpc-url $RPC > /dev/null
+  cast send $S2 --value 1ether --private-key $KEY0 --rpc-url $RPC > /dev/null
+done
+
+# Run a full session to completion and mint it on its chain.
+run_and_mint() {
+  local commodity="$1" chain_name="$2" rpc="$3" mining="$4" nonce="$5"
+  local commit sess sid pid
+  commit=$(python3 -c "import hashlib; print(hashlib.sha256(bytes.fromhex('$nonce')).hexdigest())")
+  sess=$(curl -s -X POST $SERVICE/sessions -H "Content-Type: application/json" \
+    -d "{\"wallet\":\"$ADDR0\",\"client_type\":\"desktop\",\"commodity\":\"$commodity\",\"chain\":\"$chain_name\",\"assigned_node_id\":\"node-a\",\"commit_hash\":\"$commit\"}")
+  sid=$(echo "$sess" | python3 -c "import json,sys; print(json.load(sys.stdin)['session_id'])")
+  curl -s -X POST $SERVICE/sessions/$sid/proofs -H "Content-Type: application/json" \
+    -d "{\"sequence\":1,\"hashrate\":2500,\"proof_hash\":\"$PROOF_HASH\",\"proof_input\":\"$PROOF_INPUT\",\"difficulty\":1}" > /dev/null
+  sleep 3
+  local end
+  end=$(curl -s --max-time 90 -X POST $SERVICE/sessions/$sid/end -H "Content-Type: application/json" -d "{\"nonce\":\"$nonce\"}")
+  if ! echo "$end" | grep -q "completed"; then
+    echo "  session $commodity/$chain_name did NOT complete: $end"
+    return 1
+  fi
+  pid=$(cast keccak "$sid")
+  $ADMIN propose --session-id "$sid" > /dev/null 2>&1
+  $ADMIN approve --proposal-id $pid --chain $chain_name > /dev/null 2>&1
+  cast send $mining "approveMint(bytes32)" $pid --private-key $SIGNER1_KEY --rpc-url $rpc > /dev/null
+  cast send $mining "approveMint(bytes32)" $pid --private-key $SIGNER2_KEY --rpc-url $rpc > /dev/null
+  cast rpc evm_increaseTime 172801 --rpc-url $rpc > /dev/null
+  cast rpc evm_mine --rpc-url $rpc > /dev/null
+  $ADMIN execute --proposal-id $pid --chain $chain_name --session-id "$sid" > /dev/null 2>&1
+  echo "  minted: $commodity on $chain_name (session $sid)"
+}
+
+echo "=== 13. Run + mint Session A: Gold on Ethereum ==="
+run_and_mint "Gold"   "ethereum" "$ETH_RPC"  "$ETH_MINING"  "01" || true
+echo "=== 14. Run + mint Session B: Silver on Polygon ==="
+run_and_mint "Silver" "polygon"  "$POLY_RPC" "$POLY_MINING" "02" || true
+echo "=== 14c. Run + mint Session C: Platinum on Ethereum (live Pyth XPT) ==="
+if [ -n "$XPT_8DEC" ]; then
+  run_and_mint "Platinum" "ethereum" "$ETH_RPC" "$ETH_MINING" "03" || true
+else
+  echo "  skipped: Pyth XPT feed unavailable"
+fi
+echo "=== 14d. Run + mint Session D: CrudeOil on Polygon (live Pyth WTI) ==="
+if [ -n "$WTI_8DEC" ]; then
+  run_and_mint "CrudeOil" "polygon" "$POLY_RPC" "$POLY_MINING" "04" || true
+else
+  echo "  skipped: Pyth WTI feed unavailable (contract may be expired)"
+fi
+
+echo "=== 15. Leave one ACTIVE session (Gold/Ethereum, 3,842 H/s, NOT ended) ==="
+ACOMMIT=$(python3 -c "import hashlib; print(hashlib.sha256(bytes.fromhex('99')).hexdigest())")
+ASESS=$(curl -s -X POST $SERVICE/sessions -H "Content-Type: application/json" \
+  -d "{\"wallet\":\"$ADDR0\",\"client_type\":\"desktop\",\"commodity\":\"Gold\",\"chain\":\"ethereum\",\"assigned_node_id\":\"node-a\",\"commit_hash\":\"$ACOMMIT\"}")
+ASID=$(echo "$ASESS" | python3 -c "import json,sys; print(json.load(sys.stdin)['session_id'])")
+for seq in 1 2; do
+  curl -s -X POST $SERVICE/sessions/$ASID/proofs -H "Content-Type: application/json" \
+    -d "{\"sequence\":$seq,\"hashrate\":3842,\"proof_hash\":\"$PROOF_HASH\",\"proof_input\":\"$PROOF_INPUT\",\"difficulty\":1}" > /dev/null
+done
+echo "active session $ASID left running (avg 3,842 H/s, Gold, ethereum)"
+
+echo "=== 16. Frontend .env.local ==="
+cat > "$FRONTEND/.env.local" <<ENV
+NEXT_PUBLIC_USE_LOCAL_CHAINS=true
+BACKEND_ORIGIN=http://localhost:3000
+NEXT_PUBLIC_CHAIN_ID=1
+NEXT_PUBLIC_WC_PROJECT_ID=PRIMORA_DEMO
+ENV
+echo "wrote $FRONTEND/.env.local (gitignored)"
+
+PAYOUT_COUNT=$($PSQL -t -A -c "SELECT COUNT(*) FROM mint_proposals;" 2>/dev/null | tr -d '[:space:]')
+
+cat <<BANNER
+
+==================================================================
+  PRIMORA ENVIRONMENT READY  (persistent -- still running)
+==================================================================
+  Backend API : http://localhost:3000   (health: $(curl -s $SERVICE/health))
+  Ethereum RPC: http://localhost:8545    (chain-id 1)
+  Polygon  RPC: http://localhost:8546    (chain-id 137)
+
+  Demo user   : $ADDR0
+  Private key : $KEY0
+                (well-known Anvil account 0 -- import into MetaMask)
+
+  ---- MetaMask setup ----
+  Add network "Ethereum-local": RPC http://localhost:8545, Chain ID 1,   Symbol ETH
+  Add network "Polygon-local" : RPC http://localhost:8546, Chain ID 137, Symbol POL
+  Import account using the private key above.
+
+  ---- Start the frontend ----
+  cd $FRONTEND
+  # .env.local already written (USE_LOCAL_CHAINS=true, BACKEND_ORIGIN=:3000)
+  npm run dev -- -p 3001
+  open http://localhost:3001  and connect the imported wallet
+
+  ---- Seeded data (what the Overview should show) ----
+  Oracle & Network : XAU \$3,204 + XAG \$31.80 (Chainlink mocks); XPT + WTI LIVE from Pyth Hermes
+  Recent Payouts   : $PAYOUT_COUNT minted payout(s) -- Gold/ETH, Silver/POL, Platinum/ETH, CrudeOil/POL -- wei gross_prm + net USD
+  Earnings         : all four commodities (with live feeds), net redemption USD
+  Staking / Total  : Ethereum 30,000 PRM (180d) + Polygon 30,000 PRM = 60,000 staked, +boost
+  Reserve Health   : $RESERVE_OK
+  Mining Speed     : 3,842 H/s (active session)
+  Active Mining    : LIVE Gold session on Ethereum (avg 3,842 H/s)
+  Entity Share KPI : still placeholder (no data source defined yet)
+
+  Commodities: all four mined -- Gold/Silver from local Chainlink mock feeds,
+  Platinum/CrudeOil from REAL Pyth Hermes (live, requires backend internet).
+
+  ---- Stop everything ----
+  scripts/demo_env_stop.sh
+==================================================================
+BANNER
+
+rm -f "$OVERRIDE" 2>/dev/null || true
