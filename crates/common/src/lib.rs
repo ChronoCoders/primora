@@ -340,10 +340,11 @@ impl ValidationResult {
 }
 
 impl AttestationResult {
-    /// True when at least 2 signatures are present.
-    /// Assigned node signature is always index 0.
+    /// True when at least 3 signatures are present (the 3-of-4 BFT quorum).
+    /// Assigned node signature is always index 0. Distinct-verified-signer
+    /// counting lands with signer-identity verification (attestation fix #4).
     pub fn is_sufficient(&self) -> bool {
-        self.signatures.len() >= 2
+        self.signatures.len() >= 3
     }
 }
 

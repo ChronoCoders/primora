@@ -15,8 +15,13 @@ use chrono::Utc;
 use common::{AttestationResult, NodeId, NodeSignature, PartialProof, SessionId};
 use sha2::{Digest, Sha256};
 
-const REQUIRED_SIGNATURES: usize = 2;
+const REQUIRED_SIGNATURES: usize = 3;
 const ATTESTATION_TIMEOUT_SECS: u64 = 15;
+
+/// Total nodes in a 3-of-4 attestation set: the assigned node plus
+/// `ATTESTATION_NODE_COUNT - 1` selected others. BFT f=1 (N=3f+1=4, quorum=2f+1=3):
+/// the pool must hold at least this many nodes to reach quorum.
+pub const ATTESTATION_NODE_COUNT: usize = 4;
 
 /// Abstraction over a node attestation transport. The real Tonic gRPC client
 /// implements this in a later change; mocks implement it for testing.
@@ -80,7 +85,7 @@ fn hash_proofs(proof_set: &[PartialProof]) -> [u8; 32] {
     out
 }
 
-/// Orchestrates 2-of-3 node attestation for a session.
+/// Orchestrates 3-of-4 node attestation for a session (BFT f=1).
 pub struct NodeCoordinator<C: NodeClient> {
     clients: HashMap<NodeId, Arc<C>>,
     eligible_nodes: Vec<NodeId>,
@@ -89,7 +94,7 @@ pub struct NodeCoordinator<C: NodeClient> {
 }
 
 impl<C: NodeClient> NodeCoordinator<C> {
-    /// Creates a coordinator requiring 2 signatures and a 15-second timeout.
+    /// Creates a coordinator requiring 3 signatures and a 15-second timeout.
     ///
     /// `clients` maps each node id to the client bound to that node's endpoint, so
     /// a request for a given node id reaches that distinct physical node.
@@ -104,8 +109,9 @@ impl<C: NodeClient> NodeCoordinator<C> {
         }
     }
 
-    /// Deterministically selects up to 2 nodes by Fisher-Yates shuffling the
-    /// eligible pool with `seed` as entropy, optionally excluding one node.
+    /// Deterministically selects up to `ATTESTATION_NODE_COUNT - 1` other nodes by
+    /// Fisher-Yates shuffling the eligible pool with `seed` as entropy, optionally
+    /// excluding one node (the assigned node, which is the fourth attester).
     pub fn select_nodes(&self, seed: [u8; 32], exclude: Option<&NodeId>) -> Vec<NodeId> {
         let mut pool: Vec<NodeId> = self
             .eligible_nodes
@@ -119,7 +125,7 @@ impl<C: NodeClient> NodeCoordinator<C> {
             let j = (entropy % (i as u64 + 1)) as usize;
             pool.swap(i, j);
         }
-        pool.into_iter().take(REQUIRED_SIGNATURES).collect()
+        pool.into_iter().take(ATTESTATION_NODE_COUNT - 1).collect()
     }
 
     async fn try_request(
@@ -147,9 +153,11 @@ impl<C: NodeClient> NodeCoordinator<C> {
         }
     }
 
-    /// Collects 2-of-3 attestation for a session: selects Node B and Node C
-    /// (excluding the assigned node), requests their signatures in parallel,
-    /// and assembles the result around the assigned node's signature.
+    /// Collects 3-of-4 attestation for a session: selects up to 3 other nodes
+    /// (excluding the assigned node), requests each one's signature via its own
+    /// client, and assembles the result around the assigned node's signature. A
+    /// node with no configured client is skipped (never rerouted). Succeeds only
+    /// when at least `required_signatures` (3) signatures are collected.
     pub async fn coordinate_attestation(
         &self,
         session_id: SessionId,
@@ -160,17 +168,13 @@ impl<C: NodeClient> NodeCoordinator<C> {
     ) -> Result<AttestationResult, NodeCoordinatorError> {
         let selected = self.select_nodes(seed, Some(assigned_node_id));
         let timeout = Duration::from_secs(self.attestation_timeout_secs);
-        let responses: Vec<Option<NodeSignature>> = match selected.as_slice() {
-            [] => Vec::new(),
-            [a] => vec![self.try_request(a, assigned_node_id, &proof_set, timeout).await],
-            [a, b, ..] => {
-                let (ra, rb) = tokio::join!(
-                    self.try_request(a, assigned_node_id, &proof_set, timeout),
-                    self.try_request(b, assigned_node_id, &proof_set, timeout),
-                );
-                vec![ra, rb]
-            }
-        };
+        let mut responses: Vec<Option<NodeSignature>> = Vec::with_capacity(selected.len());
+        for target in &selected {
+            responses.push(
+                self.try_request(target, assigned_node_id, &proof_set, timeout)
+                    .await,
+            );
+        }
 
         let mut signatures = vec![assigned_node_sig];
         let mut node_ids = vec![assigned_node_id.clone()];
@@ -335,7 +339,11 @@ mod tests {
             NodeId("nA".to_string()),
             Arc::new(MockNodeClient::Tagged("client-A")),
         );
-        let coord = NodeCoordinator::new(clients, nodes(&["nA", "nB"]));
+        clients.insert(
+            NodeId("nB".to_string()),
+            Arc::new(MockNodeClient::Tagged("client-B")),
+        );
+        let coord = NodeCoordinator::new(clients, nodes(&["nA", "nB", "nC"]));
         let assigned = NodeId("assigned".to_string());
         let result = coord
             .coordinate_attestation(
@@ -347,12 +355,36 @@ mod tests {
             )
             .await
             .unwrap();
-        let from_a = result
-            .signatures
-            .iter()
-            .filter(|s| s.node_id.0 == "client-A")
-            .count();
+        assert_eq!(result.signatures.len(), 3);
+        assert_eq!(result.node_ids.len(), 3);
+        let from_a = result.signatures.iter().filter(|s| s.node_id.0 == "client-A").count();
+        let from_b = result.signatures.iter().filter(|s| s.node_id.0 == "client-B").count();
         assert_eq!(from_a, 1);
+        assert_eq!(from_b, 1);
+    }
+
+    #[tokio::test]
+    async fn test_two_signatures_insufficient_for_quorum() {
+        let mut clients: HashMap<NodeId, Arc<MockNodeClient>> = HashMap::new();
+        clients.insert(
+            NodeId("nA".to_string()),
+            Arc::new(MockNodeClient::Tagged("client-A")),
+        );
+        let coord = NodeCoordinator::new(clients, nodes(&["nA"]));
+        let assigned = NodeId("assigned".to_string());
+        let result = coord
+            .coordinate_attestation(
+                SessionId("s".to_string()),
+                dummy_sig("assigned"),
+                Vec::new(),
+                [9u8; 32],
+                &assigned,
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(NodeCoordinatorError::InsufficientAttestations { got: 2, required: 3 })
+        ));
     }
 
     #[tokio::test]
@@ -370,7 +402,7 @@ mod tests {
             .await;
         assert!(matches!(
             result,
-            Err(NodeCoordinatorError::InsufficientAttestations { got: 1, required: 2 })
+            Err(NodeCoordinatorError::InsufficientAttestations { got: 1, required: 3 })
         ));
     }
 }

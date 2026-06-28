@@ -11,7 +11,7 @@ use alloy::signers::local::PrivateKeySigner;
 use anomaly_engine::AnomalyEngine;
 use common::{AnomalyEvent, Chain, NodeId, NodeSite};
 use mint_ceiling::MintCeilingCalculator;
-use node_coordinator::{GrpcNodeClient, NodeCoordinator};
+use node_coordinator::{GrpcNodeClient, NodeCoordinator, ATTESTATION_NODE_COUNT};
 use onchain_client::{OnchainClient, OracleSubmitter, StakingReader};
 use postgres_store::PostgresStore;
 use rate_limiter::RateLimiter;
@@ -358,6 +358,13 @@ async fn main() {
         let node_id = NodeId(DEFAULT_NODE_ENDPOINT.to_string());
         node_ids.push(node_id.clone());
         node_clients.insert(node_id, Arc::new(client));
+    }
+    if node_ids.len() < ATTESTATION_NODE_COUNT {
+        tracing::warn!(
+            configured = node_ids.len(),
+            required = ATTESTATION_NODE_COUNT,
+            "fewer attestation nodes than the 3-of-4 quorum needs; attestation will fail to reach quorum until at least {ATTESTATION_NODE_COUNT} nodes are configured"
+        );
     }
     let node_coordinator = NodeCoordinator::new(node_clients, node_ids);
 
