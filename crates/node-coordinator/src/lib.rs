@@ -153,35 +153,32 @@ impl<C: NodeClient> NodeCoordinator<C> {
         }
     }
 
-    /// Collects 3-of-4 attestation for a session: selects up to 3 other nodes
-    /// (excluding the assigned node), requests each one's signature via its own
-    /// client, and assembles the result around the assigned node's signature. A
-    /// node with no configured client is skipped (never rerouted). Succeeds only
-    /// when at least `required_signatures` (3) signatures are collected.
+    /// Collects 3-of-4 attestation for a session: the attesting set is the
+    /// assigned node plus up to 3 others selected (excluding the assigned). Every
+    /// node, including the assigned one, is requested for a genuine signature via
+    /// its own client; a node with no configured client or no response is skipped
+    /// (never rerouted, never a placeholder). Succeeds only when at least
+    /// `required_signatures` (3) genuine signatures are collected.
     pub async fn coordinate_attestation(
         &self,
         session_id: SessionId,
-        assigned_node_sig: NodeSignature,
         proof_set: Vec<PartialProof>,
         seed: [u8; 32],
         assigned_node_id: &NodeId,
     ) -> Result<AttestationResult, NodeCoordinatorError> {
-        let selected = self.select_nodes(seed, Some(assigned_node_id));
+        let mut targets = vec![assigned_node_id.clone()];
+        targets.extend(self.select_nodes(seed, Some(assigned_node_id)));
         let timeout = Duration::from_secs(self.attestation_timeout_secs);
-        let mut responses: Vec<Option<NodeSignature>> = Vec::with_capacity(selected.len());
-        for target in &selected {
-            responses.push(
-                self.try_request(target, assigned_node_id, &proof_set, timeout)
-                    .await,
-            );
-        }
 
-        let mut signatures = vec![assigned_node_sig];
-        let mut node_ids = vec![assigned_node_id.clone()];
-        for (node_id, response) in selected.iter().zip(responses) {
-            if let Some(signature) = response {
+        let mut signatures = Vec::with_capacity(targets.len());
+        let mut node_ids = Vec::with_capacity(targets.len());
+        for target in &targets {
+            if let Some(signature) = self
+                .try_request(target, assigned_node_id, &proof_set, timeout)
+                .await
+            {
                 signatures.push(signature);
-                node_ids.push(node_id.clone());
+                node_ids.push(target.clone());
             }
         }
 
@@ -280,106 +277,100 @@ mod tests {
         assert_ne!(first, second);
     }
 
+    fn tagged_map(ids: &[&'static str]) -> HashMap<NodeId, Arc<MockNodeClient>> {
+        ids.iter()
+            .map(|id| {
+                (
+                    NodeId(id.to_string()),
+                    Arc::new(MockNodeClient::Tagged(id)),
+                )
+            })
+            .collect()
+    }
+
     #[tokio::test]
-    async fn test_coordinate_attestation_success() {
-        let coord = coordinator(MockNodeClient::AlwaysSucceed, &["n1", "n2", "n3"]);
+    async fn test_assigned_node_is_a_real_signer() {
+        // Assigned node has its own client and signs alongside 3 others (4 total).
+        let coord = NodeCoordinator::new(tagged_map(&["n0", "n1", "n2", "n3"]), nodes(&["n1", "n2", "n3"]));
         let assigned = NodeId("n0".to_string());
         let result = coord
-            .coordinate_attestation(
-                SessionId("s".to_string()),
-                dummy_sig("n0"),
-                Vec::new(),
-                [7u8; 32],
-                &assigned,
-            )
-            .await;
-        assert!(result.is_ok());
-        let attestation = result.unwrap();
-        assert!(attestation.is_sufficient());
+            .coordinate_attestation(SessionId("s".to_string()), Vec::new(), [7u8; 32], &assigned)
+            .await
+            .unwrap();
+        assert!(result.is_sufficient());
+        assert_eq!(result.node_ids.len(), 4);
+        assert!(result.node_ids.contains(&assigned));
+    }
+
+    #[tokio::test]
+    async fn test_quorum_met_with_one_other_failing() {
+        // Assigned + 2 others sign; the 4th (n3) has no client and is skipped -> 3.
+        let coord =
+            NodeCoordinator::new(tagged_map(&["n0", "n1", "n2"]), nodes(&["n1", "n2", "n3"]));
+        let assigned = NodeId("n0".to_string());
+        let result = coord
+            .coordinate_attestation(SessionId("s".to_string()), Vec::new(), [7u8; 32], &assigned)
+            .await
+            .unwrap();
+        assert!(result.is_sufficient());
+        assert_eq!(result.signatures.len(), 3);
+        assert!(result.node_ids.contains(&assigned));
+        assert!(!result.node_ids.contains(&NodeId("n3".to_string())));
+    }
+
+    #[tokio::test]
+    async fn test_assigned_unreachable_is_not_placeholdered() {
+        // Assigned has no client: it must be absent from the result, never a
+        // zero-placeholder slot. The 3 reachable others still reach quorum.
+        let coord =
+            NodeCoordinator::new(tagged_map(&["n1", "n2", "n3"]), nodes(&["n1", "n2", "n3"]));
+        let assigned = NodeId("n0".to_string());
+        let result = coord
+            .coordinate_attestation(SessionId("s".to_string()), Vec::new(), [7u8; 32], &assigned)
+            .await
+            .unwrap();
+        assert_eq!(result.signatures.len(), 3);
+        assert!(!result.node_ids.contains(&assigned));
+        assert!(result.signatures.iter().all(|s| s.node_id != assigned));
     }
 
     #[tokio::test]
     async fn test_routes_to_distinct_clients() {
-        let mut clients: HashMap<NodeId, Arc<MockNodeClient>> = HashMap::new();
-        clients.insert(
-            NodeId("nA".to_string()),
-            Arc::new(MockNodeClient::Tagged("client-A")),
-        );
-        clients.insert(
-            NodeId("nB".to_string()),
-            Arc::new(MockNodeClient::Tagged("client-B")),
-        );
-        let coord = NodeCoordinator::new(clients, nodes(&["nA", "nB"]));
+        let coord = NodeCoordinator::new(tagged_map(&["assigned", "nA", "nB"]), nodes(&["nA", "nB"]));
         let assigned = NodeId("assigned".to_string());
         let result = coord
-            .coordinate_attestation(
-                SessionId("s".to_string()),
-                dummy_sig("assigned"),
-                Vec::new(),
-                [9u8; 32],
-                &assigned,
-            )
+            .coordinate_attestation(SessionId("s".to_string()), Vec::new(), [9u8; 32], &assigned)
             .await
             .unwrap();
         assert_eq!(result.node_ids.len(), 3);
-        for (node_id, sig) in result.node_ids.iter().zip(result.signatures.iter()).skip(1) {
-            let expected = match node_id.0.as_str() {
-                "nA" => "client-A",
-                "nB" => "client-B",
-                other => panic!("unexpected selected node {other}"),
-            };
-            assert_eq!(sig.node_id.0, expected);
+        for (node_id, sig) in result.node_ids.iter().zip(result.signatures.iter()) {
+            assert_eq!(sig.node_id.0, node_id.0);
         }
     }
 
     #[tokio::test]
     async fn test_missing_client_skipped_no_fallback() {
-        let mut clients: HashMap<NodeId, Arc<MockNodeClient>> = HashMap::new();
-        clients.insert(
-            NodeId("nA".to_string()),
-            Arc::new(MockNodeClient::Tagged("client-A")),
-        );
-        clients.insert(
-            NodeId("nB".to_string()),
-            Arc::new(MockNodeClient::Tagged("client-B")),
-        );
-        let coord = NodeCoordinator::new(clients, nodes(&["nA", "nB", "nC"]));
+        // nC has no client; it is skipped (not rerouted). Assigned + nA + nB = 3.
+        let coord =
+            NodeCoordinator::new(tagged_map(&["assigned", "nA", "nB"]), nodes(&["nA", "nB", "nC"]));
         let assigned = NodeId("assigned".to_string());
         let result = coord
-            .coordinate_attestation(
-                SessionId("s".to_string()),
-                dummy_sig("assigned"),
-                Vec::new(),
-                [9u8; 32],
-                &assigned,
-            )
+            .coordinate_attestation(SessionId("s".to_string()), Vec::new(), [9u8; 32], &assigned)
             .await
             .unwrap();
         assert_eq!(result.signatures.len(), 3);
-        assert_eq!(result.node_ids.len(), 3);
-        let from_a = result.signatures.iter().filter(|s| s.node_id.0 == "client-A").count();
-        let from_b = result.signatures.iter().filter(|s| s.node_id.0 == "client-B").count();
-        assert_eq!(from_a, 1);
-        assert_eq!(from_b, 1);
+        assert!(!result.node_ids.contains(&NodeId("nC".to_string())));
+        for tag in ["assigned", "nA", "nB"] {
+            assert_eq!(result.signatures.iter().filter(|s| s.node_id.0 == tag).count(), 1);
+        }
     }
 
     #[tokio::test]
     async fn test_two_signatures_insufficient_for_quorum() {
-        let mut clients: HashMap<NodeId, Arc<MockNodeClient>> = HashMap::new();
-        clients.insert(
-            NodeId("nA".to_string()),
-            Arc::new(MockNodeClient::Tagged("client-A")),
-        );
-        let coord = NodeCoordinator::new(clients, nodes(&["nA"]));
+        let coord = NodeCoordinator::new(tagged_map(&["assigned", "nA"]), nodes(&["nA"]));
         let assigned = NodeId("assigned".to_string());
         let result = coord
-            .coordinate_attestation(
-                SessionId("s".to_string()),
-                dummy_sig("assigned"),
-                Vec::new(),
-                [9u8; 32],
-                &assigned,
-            )
+            .coordinate_attestation(SessionId("s".to_string()), Vec::new(), [9u8; 32], &assigned)
             .await;
         assert!(matches!(
             result,
@@ -392,17 +383,11 @@ mod tests {
         let coord = coordinator(MockNodeClient::AlwaysFail, &["n0", "n1"]);
         let assigned = NodeId("n0".to_string());
         let result = coord
-            .coordinate_attestation(
-                SessionId("s".to_string()),
-                dummy_sig("n0"),
-                Vec::new(),
-                [3u8; 32],
-                &assigned,
-            )
+            .coordinate_attestation(SessionId("s".to_string()), Vec::new(), [3u8; 32], &assigned)
             .await;
         assert!(matches!(
             result,
-            Err(NodeCoordinatorError::InsufficientAttestations { got: 1, required: 3 })
+            Err(NodeCoordinatorError::InsufficientAttestations { got: 0, required: 3 })
         ));
     }
 }

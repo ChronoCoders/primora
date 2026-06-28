@@ -14,9 +14,9 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::Utc;
 use common::{
-    AnomalyEvent, Chain, ClientType, Commodity, InvalidReason, MintProposal, NodeId, NodeSignature,
-    PartialProof, ProofValidator, ProposalStatus, SessionContext, SessionId, SuspicionLevel,
-    ValidationMode, ValidationResult,
+    AnomalyEvent, Chain, ClientType, Commodity, InvalidReason, MintProposal, NodeId, PartialProof,
+    ProofValidator, ProposalStatus, SessionContext, SessionId, SuspicionLevel, ValidationMode,
+    ValidationResult,
 };
 use proof_validator::PreFilterValidator;
 use rate_limiter::RateLimitResult;
@@ -718,24 +718,12 @@ async fn end_session(
         }
     };
 
-    // TODO(phase2-node): retrieve real NodeSignature from assigned node via gRPC
-    // The assigned node sends its NodeSignature with SessionEnded message.
-    // Until node binary exists, use placeholder.
-    let assigned_node_sig = NodeSignature {
-        node_id: assigned_node_id.clone(),
-        signature: Signature::new(U256::ZERO, U256::ZERO, false),
-        signed_at: Utc::now(),
-    };
-
+    // TODO(phase3-attestation-identity): the coordinator counts genuine returned
+    // signatures but does not yet ecrecover each signer and check it against a
+    // registered distinct node identity; that lands with attestation fix #4.
     let attestation = state
         .node_coordinator
-        .coordinate_attestation(
-            session_id.clone(),
-            assigned_node_sig,
-            proof_set,
-            seed,
-            &assigned_node_id,
-        )
+        .coordinate_attestation(session_id.clone(), proof_set, seed, &assigned_node_id)
         .await;
 
     match attestation {
