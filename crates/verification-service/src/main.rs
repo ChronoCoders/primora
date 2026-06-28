@@ -22,6 +22,8 @@ use verification_service::{serve, AppState};
 const DEFAULT_NODE_ENDPOINT: &str = "http://localhost:50051";
 const DEFAULT_NODE_API_KEY: &str = "dev-api-key";
 const DEFAULT_LOG_LEVEL: &str = "info";
+const DEFAULT_MINT_CEILING_ACTIVE_USERS: &str = "1000";
+const DEFAULT_MINT_CEILING_AVG_DAILY_PRM_PER_USER: &str = "500";
 const ANOMALY_CHANNEL_CAPACITY: usize = 1024;
 
 /// Service configuration assembled from environment variables.
@@ -34,6 +36,8 @@ struct Config {
     signing_key_hex: String,
     node_endpoints: Vec<String>,
     node_api_key: String,
+    mint_ceiling_active_users: u64,
+    mint_ceiling_avg_daily_prm_per_user: u64,
 }
 
 /// Reads a required environment variable, returning a descriptive error when it
@@ -207,6 +211,18 @@ fn load_config() -> Result<Config, String> {
     let node_endpoints =
         parse_node_endpoints(&optional("NODE_ENDPOINTS", DEFAULT_NODE_ENDPOINT));
     let node_api_key = optional("NODE_API_KEY", DEFAULT_NODE_API_KEY);
+    let mint_ceiling_active_users = optional(
+        "MINT_CEILING_ACTIVE_USERS",
+        DEFAULT_MINT_CEILING_ACTIVE_USERS,
+    )
+    .parse::<u64>()
+    .map_err(|_| "MINT_CEILING_ACTIVE_USERS must be a u64".to_string())?;
+    let mint_ceiling_avg_daily_prm_per_user = optional(
+        "MINT_CEILING_AVG_DAILY_PRM_PER_USER",
+        DEFAULT_MINT_CEILING_AVG_DAILY_PRM_PER_USER,
+    )
+    .parse::<u64>()
+    .map_err(|_| "MINT_CEILING_AVG_DAILY_PRM_PER_USER must be a u64".to_string())?;
 
     Ok(Config {
         database_url,
@@ -217,6 +233,8 @@ fn load_config() -> Result<Config, String> {
         signing_key_hex,
         node_endpoints,
         node_api_key,
+        mint_ceiling_active_users,
+        mint_ceiling_avg_daily_prm_per_user,
     })
 }
 
@@ -365,6 +383,8 @@ async fn main() {
         staking_readers,
         twap_sessions: Arc::new(RwLock::new(HashMap::new())),
         node_sites: Arc::new(parse_node_sites(&optional("NODE_SITES", ""))),
+        mint_ceiling_active_users: config.mint_ceiling_active_users,
+        mint_ceiling_avg_daily_prm_per_user: config.mint_ceiling_avg_daily_prm_per_user,
     };
 
     let bind_addr = config.bind_addr;

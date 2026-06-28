@@ -53,6 +53,17 @@ impl MintCeilingCalculator {
         (daily_target / self.blocks_per_day) * self.safety_multiplier
     }
 
+    /// Returns the whole-PRM daily mint ceiling for the given inputs: the daily
+    /// target scaled by the safety multiplier (`active_users ×
+    /// avg_daily_prm_per_user × safety_multiplier`). Saturating to avoid overflow
+    /// on extreme inputs. This is the backend's per-day cap, stricter than the
+    /// on-chain per-block ceiling.
+    pub fn daily_ceiling(&self, active_users: u64, avg_daily_prm_per_user: u64) -> u64 {
+        active_users
+            .saturating_mul(avg_daily_prm_per_user)
+            .saturating_mul(self.safety_multiplier)
+    }
+
     /// Builds a [`CeilingProposal`] for the given inputs at the current UTC time.
     pub fn propose(&self, active_users: u64, avg_daily_prm_per_user: u64) -> CeilingProposal {
         let daily_target_prm = active_users * avg_daily_prm_per_user;
@@ -95,6 +106,19 @@ mod tests {
     fn test_calculate_large() {
         let calc = MintCeilingCalculator::new();
         assert_eq!(calc.calculate(10_000, 1_000), 4_164);
+    }
+
+    #[test]
+    fn test_daily_ceiling() {
+        let calc = MintCeilingCalculator::new();
+        assert_eq!(calc.daily_ceiling(1_000, 500), 1_500_000);
+        assert_eq!(calc.daily_ceiling(0, 500), 0);
+    }
+
+    #[test]
+    fn test_daily_ceiling_saturates() {
+        let calc = MintCeilingCalculator::new();
+        assert_eq!(calc.daily_ceiling(u64::MAX, u64::MAX), u64::MAX);
     }
 
     #[test]

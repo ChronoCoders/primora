@@ -303,6 +303,20 @@ impl PostgresStore {
         Ok(earnings)
     }
 
+    /// Returns the total `gross_prm` (wei) across ALL mint proposals created in
+    /// the last 24 hours, as a decimal string preserving full NUMERIC precision.
+    /// Backs the backend per-day mint ceiling. `"0"` when there are none.
+    pub async fn total_minted_wei_24h(&self) -> Result<String, PostgresStoreError> {
+        let row = sqlx::query(
+            "SELECT COALESCE(SUM(gross_prm), 0)::text AS total \
+             FROM mint_proposals \
+             WHERE created_at > now() - interval '24 hours'",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.try_get("total")?)
+    }
+
     /// Returns a wallet's total earnings over the last 24 hours: summed gross PRM
     /// (wei) and net redemption USD (cents). `wallet` must be debug-formatted
     /// (`format!("{:?}", _)`) to match stored rows, identical to
@@ -517,5 +531,24 @@ mod tests {
         assert_eq!(earnings.payout_count, 1);
         assert_eq!(earnings.total_usd_cents, 1_531);
         assert_eq!(earnings.total_gross_prm, "18000000000000000000000");
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_total_minted_wei_24h_window() {
+        let store = store().await;
+        let before: u128 = store.total_minted_wei_24h().await.unwrap().parse().unwrap();
+        let mut recent_a = dummy_proposal("sess-mint-recent-a", Chain::Ethereum);
+        recent_a.created_at = Utc::now();
+        let mut recent_b = dummy_proposal("sess-mint-recent-b", Chain::Polygon);
+        recent_b.created_at = Utc::now();
+        let mut old = dummy_proposal("sess-mint-old", Chain::Ethereum);
+        old.created_at = Utc::now() - chrono::Duration::days(2);
+        store.insert_mint_proposal(&recent_a).await.unwrap();
+        store.insert_mint_proposal(&recent_b).await.unwrap();
+        store.insert_mint_proposal(&old).await.unwrap();
+
+        let after: u128 = store.total_minted_wei_24h().await.unwrap().parse().unwrap();
+        assert_eq!(after - before, 2 * 18_000_000_000_000_000_000_000u128);
     }
 }

@@ -30,6 +30,7 @@ const SEED_BLOCK_OFFSET: u64 = 3;
 
 /// Divisor converting a 6-decimal USDC amount to cents (2 decimals): `10^(6-2)`.
 const NET_USDC_SCALE_TO_CENTS: u128 = 10_000;
+const PRM_WEI: u128 = 1_000_000_000_000_000_000;
 
 /// Default number of payout rows returned by the payouts endpoint.
 const DEFAULT_PAYOUT_LIMIT: i64 = 50;
@@ -69,6 +70,11 @@ pub struct AppState {
     /// Node id -> site metadata, from the `NODE_SITES` config. Empty when unset;
     /// a node absent from the map resolves to no site.
     pub node_sites: Arc<HashMap<String, common::NodeSite>>,
+    /// Active-user input to the per-day mint ceiling (`MINT_CEILING_ACTIVE_USERS`).
+    pub mint_ceiling_active_users: u64,
+    /// Average daily PRM/user input to the per-day mint ceiling
+    /// (`MINT_CEILING_AVG_DAILY_PRM_PER_USER`).
+    pub mint_ceiling_avg_daily_prm_per_user: u64,
 }
 
 /// Request body for creating a session.
@@ -793,6 +799,40 @@ async fn end_session(
                 house_edge_bps = %payout_result.house_edge_bps,
                 "payout computed (mint amount in base units)"
             );
+
+            let minted_24h_wei = match state.postgres_store.total_minted_wei_24h().await {
+                Ok(total) => total.parse::<u128>().unwrap_or(u128::MAX),
+                Err(e) => {
+                    tracing::error!(error = %e, session_id = %session_id.0, "failed to read 24h minted total; deferring mint");
+                    return Ok((
+                        StatusCode::OK,
+                        Json(EndSessionResponse {
+                            status: "mint_ceiling_unverified".to_string(),
+                        }),
+                    ));
+                }
+            };
+            let daily_ceiling_prm = state.mint_ceiling.daily_ceiling(
+                state.mint_ceiling_active_users,
+                state.mint_ceiling_avg_daily_prm_per_user,
+            );
+            let daily_ceiling_wei = (daily_ceiling_prm as u128).saturating_mul(PRM_WEI);
+            if minted_24h_wei.saturating_add(mint_amount_wei) > daily_ceiling_wei {
+                tracing::error!(
+                    session_id = %session_id.0,
+                    wallet = %ctx.wallet,
+                    mint_amount_wei = %mint_amount_wei,
+                    minted_24h_wei = %minted_24h_wei,
+                    daily_ceiling_wei = %daily_ceiling_wei,
+                    "mint rejected: would exceed per-day mint ceiling"
+                );
+                return Ok((
+                    StatusCode::OK,
+                    Json(EndSessionResponse {
+                        status: "mint_ceiling_exceeded".to_string(),
+                    }),
+                ));
+            }
 
             let mut proposal = MintProposal {
                 session_id: session_id.clone(),
