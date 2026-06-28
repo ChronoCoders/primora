@@ -155,8 +155,9 @@ impl std::fmt::Display for Chain {
     }
 }
 
-/// Physical/datacenter site of a node, resolved from backend config
-/// (`NODE_SITES`). Not derived from the on-chain NodeRegistry, which carries no
+/// Geographic site of a node, resolved from backend config (`NODE_SITES`).
+/// Purely geographic: code, city, country only -- never a cloud/infrastructure
+/// provider name. Not derived from the on-chain NodeRegistry, which carries no
 /// geography.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeSite {
