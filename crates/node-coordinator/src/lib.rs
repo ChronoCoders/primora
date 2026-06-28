@@ -6,6 +6,7 @@ pub mod grpc;
 
 pub use grpc::GrpcNodeClient;
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -81,7 +82,7 @@ fn hash_proofs(proof_set: &[PartialProof]) -> [u8; 32] {
 
 /// Orchestrates 2-of-3 node attestation for a session.
 pub struct NodeCoordinator<C: NodeClient> {
-    client: Arc<C>,
+    clients: HashMap<NodeId, Arc<C>>,
     eligible_nodes: Vec<NodeId>,
     required_signatures: usize,
     attestation_timeout_secs: u64,
@@ -89,9 +90,14 @@ pub struct NodeCoordinator<C: NodeClient> {
 
 impl<C: NodeClient> NodeCoordinator<C> {
     /// Creates a coordinator requiring 2 signatures and a 15-second timeout.
-    pub fn new(client: Arc<C>, eligible_nodes: Vec<NodeId>) -> Self {
+    ///
+    /// `clients` maps each node id to the client bound to that node's endpoint, so
+    /// a request for a given node id reaches that distinct physical node.
+    /// `eligible_nodes` is the ordered selection pool (kept separate from the map
+    /// so node selection stays deterministic under the seed).
+    pub fn new(clients: HashMap<NodeId, Arc<C>>, eligible_nodes: Vec<NodeId>) -> Self {
         Self {
-            client,
+            clients,
             eligible_nodes,
             required_signatures: REQUIRED_SIGNATURES,
             attestation_timeout_secs: ATTESTATION_TIMEOUT_SECS,
@@ -123,10 +129,16 @@ impl<C: NodeClient> NodeCoordinator<C> {
         proof_set: &[PartialProof],
         timeout: Duration,
     ) -> Option<NodeSignature> {
+        let Some(client) = self.clients.get(target_node_id) else {
+            tracing::warn!(
+                node_id = %target_node_id.0,
+                "no client configured for selected node; skipping (no fallback)"
+            );
+            return None;
+        };
         match tokio::time::timeout(
             timeout,
-            self.client
-                .request_attestation(target_node_id, assigned_node_id, proof_set),
+            client.request_attestation(target_node_id, assigned_node_id, proof_set),
         )
         .await
         {
@@ -196,6 +208,7 @@ mod tests {
     enum MockNodeClient {
         AlwaysSucceed,
         AlwaysFail,
+        Tagged(&'static str),
     }
 
     impl NodeClient for MockNodeClient {
@@ -210,6 +223,7 @@ mod tests {
                 MockNodeClient::AlwaysFail => {
                     Err(NodeCoordinatorError::NodeError("mock failure".to_string()))
                 }
+                MockNodeClient::Tagged(tag) => Ok(dummy_sig(tag)),
             };
             async move { result }
         }
@@ -228,7 +242,14 @@ mod tests {
     }
 
     fn coordinator(variant: MockNodeClient, eligible: &[&str]) -> NodeCoordinator<MockNodeClient> {
-        NodeCoordinator::new(Arc::new(variant), nodes(eligible))
+        let client = Arc::new(variant);
+        let eligible_nodes = nodes(eligible);
+        let clients: HashMap<NodeId, Arc<MockNodeClient>> = eligible_nodes
+            .iter()
+            .cloned()
+            .map(|id| (id, Arc::clone(&client)))
+            .collect();
+        NodeCoordinator::new(clients, eligible_nodes)
     }
 
     #[test]
@@ -271,6 +292,67 @@ mod tests {
         assert!(result.is_ok());
         let attestation = result.unwrap();
         assert!(attestation.is_sufficient());
+    }
+
+    #[tokio::test]
+    async fn test_routes_to_distinct_clients() {
+        let mut clients: HashMap<NodeId, Arc<MockNodeClient>> = HashMap::new();
+        clients.insert(
+            NodeId("nA".to_string()),
+            Arc::new(MockNodeClient::Tagged("client-A")),
+        );
+        clients.insert(
+            NodeId("nB".to_string()),
+            Arc::new(MockNodeClient::Tagged("client-B")),
+        );
+        let coord = NodeCoordinator::new(clients, nodes(&["nA", "nB"]));
+        let assigned = NodeId("assigned".to_string());
+        let result = coord
+            .coordinate_attestation(
+                SessionId("s".to_string()),
+                dummy_sig("assigned"),
+                Vec::new(),
+                [9u8; 32],
+                &assigned,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.node_ids.len(), 3);
+        for (node_id, sig) in result.node_ids.iter().zip(result.signatures.iter()).skip(1) {
+            let expected = match node_id.0.as_str() {
+                "nA" => "client-A",
+                "nB" => "client-B",
+                other => panic!("unexpected selected node {other}"),
+            };
+            assert_eq!(sig.node_id.0, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_missing_client_skipped_no_fallback() {
+        let mut clients: HashMap<NodeId, Arc<MockNodeClient>> = HashMap::new();
+        clients.insert(
+            NodeId("nA".to_string()),
+            Arc::new(MockNodeClient::Tagged("client-A")),
+        );
+        let coord = NodeCoordinator::new(clients, nodes(&["nA", "nB"]));
+        let assigned = NodeId("assigned".to_string());
+        let result = coord
+            .coordinate_attestation(
+                SessionId("s".to_string()),
+                dummy_sig("assigned"),
+                Vec::new(),
+                [9u8; 32],
+                &assigned,
+            )
+            .await
+            .unwrap();
+        let from_a = result
+            .signatures
+            .iter()
+            .filter(|s| s.node_id.0 == "client-A")
+            .count();
+        assert_eq!(from_a, 1);
     }
 
     #[tokio::test]

@@ -34,7 +34,7 @@ struct Config {
     chain_id: u64,
     rpc_url: String,
     signing_key_hex: String,
-    node_endpoints: Vec<String>,
+    node_endpoints: Vec<(String, String)>,
     node_api_key: String,
     mint_ceiling_active_users: u64,
     mint_ceiling_avg_daily_prm_per_user: u64,
@@ -51,13 +51,18 @@ fn optional(name: &str, default: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| default.to_string())
 }
 
-/// Parses the comma-separated `NODE_ENDPOINTS` list, trimming whitespace and
-/// dropping empty entries.
-fn parse_node_endpoints(raw: &str) -> Vec<String> {
+/// Parses the comma-separated `NODE_ENDPOINTS` list into `(node_id, endpoint)`
+/// pairs. Each entry is either `node_id=endpoint` or a bare `endpoint` (in which
+/// case the endpoint also serves as the node id). Whitespace is trimmed and empty
+/// entries dropped.
+fn parse_node_endpoints(raw: &str) -> Vec<(String, String)> {
     raw.split(',')
         .map(str::trim)
         .filter(|entry| !entry.is_empty())
-        .map(str::to_string)
+        .map(|entry| match entry.split_once('=') {
+            Some((id, endpoint)) => (id.trim().to_string(), endpoint.trim().to_string()),
+            None => (entry.to_string(), entry.to_string()),
+        })
         .collect()
 }
 
@@ -322,8 +327,8 @@ async fn main() {
     let staking_readers = build_staking_readers().await;
 
     let mut node_ids: Vec<NodeId> = Vec::new();
-    let mut first_client: Option<GrpcNodeClient> = None;
-    for endpoint in &config.node_endpoints {
+    let mut node_clients: HashMap<NodeId, Arc<GrpcNodeClient>> = HashMap::new();
+    for (id, endpoint) in &config.node_endpoints {
         let client = match GrpcNodeClient::new(endpoint.clone(), config.node_api_key.clone()).await {
             Ok(client) => client,
             Err(e) => {
@@ -331,31 +336,30 @@ async fn main() {
                 std::process::exit(1);
             }
         };
-        node_ids.push(NodeId(endpoint.clone()));
-        if first_client.is_none() {
-            first_client = Some(client);
-        }
+        let node_id = NodeId(id.clone());
+        node_ids.push(node_id.clone());
+        node_clients.insert(node_id, Arc::new(client));
     }
 
-    let grpc_client = match first_client {
-        Some(client) => client,
-        None => {
-            tracing::warn!("no node endpoints configured; using empty node list");
-            match GrpcNodeClient::new(
-                DEFAULT_NODE_ENDPOINT.to_string(),
-                config.node_api_key.clone(),
-            )
-            .await
-            {
-                Ok(client) => client,
-                Err(e) => {
-                    tracing::error!(error = %e, "startup failed: fallback node client");
-                    std::process::exit(1);
-                }
+    if node_clients.is_empty() {
+        tracing::warn!("no node endpoints configured; using the default single node");
+        let client = match GrpcNodeClient::new(
+            DEFAULT_NODE_ENDPOINT.to_string(),
+            config.node_api_key.clone(),
+        )
+        .await
+        {
+            Ok(client) => client,
+            Err(e) => {
+                tracing::error!(error = %e, "startup failed: fallback node client");
+                std::process::exit(1);
             }
-        }
-    };
-    let node_coordinator = NodeCoordinator::new(Arc::new(grpc_client), node_ids);
+        };
+        let node_id = NodeId(DEFAULT_NODE_ENDPOINT.to_string());
+        node_ids.push(node_id.clone());
+        node_clients.insert(node_id, Arc::new(client));
+    }
+    let node_coordinator = NodeCoordinator::new(node_clients, node_ids);
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<AnomalyEvent>(ANOMALY_CHANNEL_CAPACITY);
     tokio::spawn(async move {
