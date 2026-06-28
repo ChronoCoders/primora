@@ -119,6 +119,7 @@ mod tests {
             commodity: common::Commodity::Gold,
             target_chain: common::Chain::Ethereum,
             cpu_threads: 0,
+            assigned_site: None,
         }
     }
 

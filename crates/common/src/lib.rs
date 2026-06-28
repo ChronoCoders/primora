@@ -155,6 +155,19 @@ impl std::fmt::Display for Chain {
     }
 }
 
+/// Physical/datacenter site of a node, resolved from backend config
+/// (`NODE_SITES`). Not derived from the on-chain NodeRegistry, which carries no
+/// geography.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeSite {
+    /// Short site code (e.g. `JHB`).
+    pub code: String,
+    /// City name (e.g. `Johannesburg`).
+    pub city: String,
+    /// ISO country code (e.g. `ZA`).
+    pub country: String,
+}
+
 /// Session identifier.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionId(pub String);
@@ -191,6 +204,9 @@ pub struct SessionContext {
     /// reported (older clients and stored sessions predating this field).
     #[serde(default)]
     pub cpu_threads: u32,
+    /// Resolved site of the assigned node, if known (from `NODE_SITES` config).
+    #[serde(default)]
+    pub assigned_site: Option<NodeSite>,
 }
 
 /// A partial proof submitted every 30s.

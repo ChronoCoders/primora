@@ -66,6 +66,9 @@ pub struct AppState {
     pub staking_readers: Vec<(common::Chain, Arc<onchain_client::StakingReader>)>,
     /// TWAP calculators keyed by session id, guarded for concurrent access.
     pub twap_sessions: Arc<RwLock<HashMap<String, TwapCalculator>>>,
+    /// Node id -> site metadata, from the `NODE_SITES` config. Empty when unset;
+    /// a node absent from the map resolves to no site.
+    pub node_sites: Arc<HashMap<String, common::NodeSite>>,
 }
 
 /// Request body for creating a session.
@@ -278,6 +281,10 @@ async fn create_session(
     let target_chain = Chain::from_str_id(&body.chain).ok_or(ApiError::BadRequest(
         "invalid or missing chain (expected ethereum or polygon)",
     ))?;
+    let assigned_site = body
+        .assigned_node_id
+        .as_ref()
+        .and_then(|id| state.node_sites.get(id).cloned());
     let assigned_node_id = body.assigned_node_id.map(NodeId);
 
     let ip = peer.ip();
@@ -297,6 +304,7 @@ async fn create_session(
         commodity,
         target_chain,
         cpu_threads: body.cpu_threads,
+        assigned_site,
     };
     let session_id = state.session_manager.create_session(&ctx).await?;
     state

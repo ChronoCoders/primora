@@ -209,6 +209,7 @@ impl NodeService for NodeServiceImpl {
                 // chain is unused here, so default to the canonical chain.
                 target_chain: Chain::Ethereum,
                 cpu_threads: 0,
+                assigned_site: None,
             };
             match validator.validate(&proof, ValidationMode::PreFilter, &ctx) {
                 ValidationResult::Invalid(reason) => {

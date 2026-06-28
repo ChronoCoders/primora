@@ -218,6 +218,7 @@ POLYGON_ORACLE_AGGREGATOR_ADDRESS="$POLY_ORACLE" \
 POLYGON_STAKING_ADDRESS="$POLY_STAKING" \
 NODE_ENDPOINTS="http://localhost:50051" \
 NODE_API_KEY="devkey" \
+NODE_SITES='{"node-a":{"code":"JHB","city":"Johannesburg","country":"ZA"}}' \
 LOG_LEVEL="info" \
   nohup ./target/debug/primora-verification > /tmp/demo_backend.log 2>&1 &
 sleep 5

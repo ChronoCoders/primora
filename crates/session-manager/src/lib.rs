@@ -52,6 +52,12 @@ pub struct SessionSummary {
     /// no TWAP price is available yet.
     #[serde(default)]
     pub est_net_usd_cents: i64,
+    /// Site code of the assigned node (e.g. `JHB`), if known.
+    #[serde(default)]
+    pub site_code: Option<String>,
+    /// City of the assigned node (e.g. `Johannesburg`), if known.
+    #[serde(default)]
+    pub site_city: Option<String>,
 }
 
 /// Errors returned by the session store.
@@ -505,6 +511,8 @@ impl SessionStore {
                     verified_proof_count,
                     rejected_proof_count,
                     est_net_usd_cents: 0,
+                    site_code: ctx.assigned_site.as_ref().map(|s| s.code.clone()),
+                    site_city: ctx.assigned_site.as_ref().map(|s| s.city.clone()),
                 });
             }
             cursor = next;
@@ -564,6 +572,7 @@ mod tests {
             commodity: common::Commodity::Gold,
             target_chain: Chain::Polygon,
             cpu_threads: 8,
+            assigned_site: None,
         }
     }
 

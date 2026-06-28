@@ -19,6 +19,7 @@ fn ctx(client_type: ClientType, active_sessions_count: u32, last: Option<chrono:
         commodity: Commodity::Gold,
         target_chain: Chain::Ethereum,
         cpu_threads: 0,
+        assigned_site: None,
     }
 }
 

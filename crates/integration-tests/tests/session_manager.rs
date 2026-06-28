@@ -27,6 +27,7 @@ fn sample_ctx() -> SessionContext {
         commodity: Commodity::Gold,
         target_chain: Chain::Ethereum,
         cpu_threads: 4,
+        assigned_site: None,
     }
 }
 

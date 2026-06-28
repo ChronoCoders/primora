@@ -9,7 +9,7 @@ use std::sync::Arc;
 use alloy::primitives::Address;
 use alloy::signers::local::PrivateKeySigner;
 use anomaly_engine::AnomalyEngine;
-use common::{AnomalyEvent, Chain, NodeId};
+use common::{AnomalyEvent, Chain, NodeId, NodeSite};
 use mint_ceiling::MintCeilingCalculator;
 use node_coordinator::{GrpcNodeClient, NodeCoordinator};
 use onchain_client::{OnchainClient, OracleSubmitter, StakingReader};
@@ -55,6 +55,21 @@ fn parse_node_endpoints(raw: &str) -> Vec<String> {
         .filter(|entry| !entry.is_empty())
         .map(str::to_string)
         .collect()
+}
+
+/// Parses the `NODE_SITES` JSON map (node id -> site metadata). An empty or
+/// malformed value logs a warning and yields an empty map rather than failing.
+fn parse_node_sites(raw: &str) -> HashMap<String, NodeSite> {
+    if raw.trim().is_empty() {
+        return HashMap::new();
+    }
+    match serde_json::from_str::<HashMap<String, NodeSite>>(raw) {
+        Ok(map) => map,
+        Err(e) => {
+            tracing::warn!(error = %e, "invalid NODE_SITES JSON, defaulting to empty");
+            HashMap::new()
+        }
+    }
 }
 
 /// Builds one [`OracleSubmitter`] per configured chain (Decision 4b).
@@ -349,6 +364,7 @@ async fn main() {
         oracle_submitters,
         staking_readers,
         twap_sessions: Arc::new(RwLock::new(HashMap::new())),
+        node_sites: Arc::new(parse_node_sites(&optional("NODE_SITES", ""))),
     };
 
     let bind_addr = config.bind_addr;
@@ -356,5 +372,27 @@ async fn main() {
     if let Err(e) = serve(state, &bind_addr).await {
         tracing::error!(error = %e, "startup failed: server");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_node_sites_valid() {
+        let raw = r#"{"node-a":{"code":"JHB","city":"Johannesburg","country":"ZA"}}"#;
+        let map = parse_node_sites(raw);
+        let site = map.get("node-a").expect("node-a present");
+        assert_eq!(site.code, "JHB");
+        assert_eq!(site.city, "Johannesburg");
+        assert_eq!(site.country, "ZA");
+    }
+
+    #[test]
+    fn parse_node_sites_empty_or_malformed_is_empty() {
+        assert!(parse_node_sites("").is_empty());
+        assert!(parse_node_sites("   ").is_empty());
+        assert!(parse_node_sites("{not valid json").is_empty());
     }
 }
