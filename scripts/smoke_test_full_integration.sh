@@ -34,12 +34,19 @@ echo "=== 1. Infra: Postgres + Redis ==="
 docker compose -f docker-compose.yml -f "$OVERRIDE" up -d postgres redis
 sleep 5
 
-echo "=== 2. Anvil (chain-id 1) ==="
+echo "=== 2. Anvil (chain-id 1, Ethereum mainnet FORK for real Chainlink) ==="
 pkill -f anvil 2>/dev/null || true
 sleep 1
-anvil --chain-id 1 --port 8545 > /tmp/anvil_full.log 2>&1 &
-sleep 3
-cast chain-id --rpc-url $ETH_RPC
+# Real Ethereum-mainnet Chainlink XAU feed; present on the fork.
+CHAINLINK_XAU="0x214eD9Da11D2fbe465a6fc601a91E62EbEc1a0D6"
+FORK_RPC="${ETH_FORK_RPC:-}"
+if [ -z "$FORK_RPC" ] && [ -f .env ]; then
+  FORK_RPC="$(grep -E '^RPC_URL=' .env | head -1 | cut -d= -f2- | tr -d '[:space:]')" || true
+fi
+[ -n "$FORK_RPC" ] || { echo "ERROR: no mainnet fork RPC. Set ETH_FORK_RPC or RPC_URL in .env" >&2; exit 1; }
+anvil --fork-url "$FORK_RPC" --chain-id 1 --port 8545 > /tmp/anvil_full.log 2>&1 &
+for _ in $(seq 1 60); do cast block-number --rpc-url $ETH_RPC >/dev/null 2>&1 && break; sleep 1; done
+echo "chain-id $(cast chain-id --rpc-url $ETH_RPC) (forked mainnet block $(cast block-number --rpc-url $ETH_RPC))"
 
 echo "=== 3. Deploy full suite ==="
 cd contracts
@@ -47,8 +54,7 @@ forge script script/Deploy.s.sol:DeployScript --rpc-url $ETH_RPC --private-key $
 MINING=$(python3 -c "import json; print(json.load(open('deployments/local.json'))['MiningContract'])")
 PRIM=$(python3 -c "import json; print(json.load(open('deployments/local.json'))['PrimToken'])")
 ORACLE=$(python3 -c "import json; print(json.load(open('deployments/local.json'))['OracleAggregator'])")
-XAU_FEED=$(python3 -c "import json; print(json.load(open('deployments/local.json'))['MockXAUFeed'])")
-echo "Mining=$MINING Prim=$PRIM Oracle=$ORACLE XAU_FEED=$XAU_FEED"
+echo "Mining=$MINING Prim=$PRIM Oracle=$ORACLE XAU=$CHAINLINK_XAU (real, on fork)"
 cd ..
 
 echo "=== 4. Build node-server, verification-service, admin-cli, gen_proof ==="
@@ -87,7 +93,7 @@ REDIS_URL="redis://localhost:${REDIS_HOST_PORT}" \
 BIND_ADDR="0.0.0.0:3000" \
 CHAIN_ID="1" \
 RPC_URL="$ETH_RPC" \
-CHAINLINK_XAU_ADDRESS="$XAU_FEED" \
+CHAINLINK_XAU_ADDRESS="$CHAINLINK_XAU" \
 SIGNING_KEY_HEX="0000000000000000000000000000000000000000000000000000000000000001" \
 NODE_ENDPOINTS="http://localhost:50051" \
 NODE_API_KEY="devkey" \

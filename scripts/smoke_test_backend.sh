@@ -30,23 +30,29 @@ echo "=== 1. Start Postgres + Redis ==="
 docker compose -f docker-compose.yml -f "$OVERRIDE" up -d postgres redis
 sleep 5
 
-echo "=== 2. Start Anvil ==="
+echo "=== 2. Start Anvil (forked from mainnet for real Chainlink feeds) ==="
 pkill anvil 2>/dev/null || true
 sleep 1
-anvil > /tmp/anvil_smoke.log 2>&1 &
-sleep 3
-cast block-number --rpc-url $RPC
+# Real Ethereum-mainnet Chainlink XAU/XAG feeds; present on the fork.
+CHAINLINK_XAU="0x214eD9Da11D2fbe465a6fc601a91E62EbEc1a0D6"
+CHAINLINK_XAG="0x379589227b15F1a12195D3f2d90bBc9F31f95235"
+FORK_RPC="${ETH_FORK_RPC:-}"
+if [ -z "$FORK_RPC" ] && [ -f .env ]; then
+  FORK_RPC="$(grep -E '^RPC_URL=' .env | head -1 | cut -d= -f2- | tr -d '[:space:]')" || true
+fi
+[ -n "$FORK_RPC" ] || { echo "ERROR: no mainnet fork RPC. Set ETH_FORK_RPC or RPC_URL in .env" >&2; exit 1; }
+anvil --fork-url "$FORK_RPC" --chain-id 31337 --port 8545 > /tmp/anvil_smoke.log 2>&1 &
+for _ in $(seq 1 60); do cast block-number --rpc-url $RPC >/dev/null 2>&1 && break; sleep 1; done
+echo "forked mainnet block $(cast block-number --rpc-url $RPC)"
 
 echo "=== 3. Deploy contracts ==="
 cd contracts
 forge script script/Deploy.s.sol:DeployScript \
   --rpc-url $RPC --private-key $DEPLOYER_KEY --broadcast > /tmp/deploy_smoke.log 2>&1
 ORACLE_ADDR=$(python3 -c "import json; print(json.load(open('deployments/local.json'))['OracleAggregator'])")
-XAU_FEED=$(python3 -c "import json; print(json.load(open('deployments/local.json'))['MockXAUFeed'])")
-XAG_FEED=$(python3 -c "import json; print(json.load(open('deployments/local.json'))['MockXAGFeed'])")
 echo "OracleAggregator: $ORACLE_ADDR"
-echo "MockXAUFeed: $XAU_FEED"
-echo "MockXAGFeed: $XAG_FEED"
+echo "Chainlink XAU: $CHAINLINK_XAU (real, on fork)"
+echo "Chainlink XAG: $CHAINLINK_XAG (real, on fork)"
 cd ..
 
 echo "=== 4. Build backend ==="
@@ -61,8 +67,8 @@ RPC_URL="$RPC" \
 SIGNING_KEY_HEX="0000000000000000000000000000000000000000000000000000000000000001" \
 ORACLE_SUBMITTER_KEY_HEX="ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80" \
 ORACLE_AGGREGATOR_ADDRESS="$ORACLE_ADDR" \
-CHAINLINK_XAU_ADDRESS="$XAU_FEED" \
-CHAINLINK_XAG_ADDRESS="$XAG_FEED" \
+CHAINLINK_XAU_ADDRESS="$CHAINLINK_XAU" \
+CHAINLINK_XAG_ADDRESS="$CHAINLINK_XAG" \
 LOG_LEVEL="info" \
 ./target/debug/primora-verification > /tmp/backend_smoke.log 2>&1 &
 BACKEND_PID=$!

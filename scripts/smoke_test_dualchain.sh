@@ -31,13 +31,23 @@ echo "=== 1. Start Postgres + Redis ==="
 docker compose -f docker-compose.yml -f "$OVERRIDE" up -d postgres redis
 sleep 5
 
-echo "=== 2. Start two Anvil instances ==="
+echo "=== 2. Start two Anvil instances (Ethereum forked from mainnet for real Chainlink) ==="
 pkill -f anvil 2>/dev/null || true
 sleep 1
-anvil --chain-id 1   --port 8545 > /tmp/anvil_eth.log 2>&1 &
+# Real Ethereum-mainnet Chainlink XAU feed; present on the fork.
+CHAINLINK_XAU="0x214eD9Da11D2fbe465a6fc601a91E62EbEc1a0D6"
+FORK_RPC="${ETH_FORK_RPC:-}"
+if [ -z "$FORK_RPC" ] && [ -f .env ]; then
+  FORK_RPC="$(grep -E '^RPC_URL=' .env | head -1 | cut -d= -f2- | tr -d '[:space:]')" || true
+fi
+[ -n "$FORK_RPC" ] || { echo "ERROR: no mainnet fork RPC. Set ETH_FORK_RPC or RPC_URL in .env" >&2; exit 1; }
+anvil --fork-url "$FORK_RPC" --chain-id 1 --port 8545 > /tmp/anvil_eth.log 2>&1 &
 anvil --chain-id 137 --port 8546 > /tmp/anvil_pol.log 2>&1 &
-sleep 3
-echo "ETH chain-id: $(cast chain-id --rpc-url $ETH_RPC)"
+for _ in $(seq 1 60); do
+  cast block-number --rpc-url $ETH_RPC >/dev/null 2>&1 && cast chain-id --rpc-url $POL_RPC >/dev/null 2>&1 && break
+  sleep 1
+done
+echo "ETH chain-id: $(cast chain-id --rpc-url $ETH_RPC) (forked mainnet block $(cast block-number --rpc-url $ETH_RPC))"
 echo "POL chain-id: $(cast chain-id --rpc-url $POL_RPC)"
 
 echo "=== 3. Deploy full suite to BOTH chains ==="
@@ -55,7 +65,6 @@ ETH_MINING=$(python3 -c "import json; print(json.load(open('/tmp/deploy_eth.json
 POL_MINING=$(python3 -c "import json; print(json.load(open('/tmp/deploy_pol.json'))['MiningContract'])")
 ETH_PRIM=$(python3 -c "import json; print(json.load(open('/tmp/deploy_eth.json'))['PrimToken'])")
 POL_PRIM=$(python3 -c "import json; print(json.load(open('/tmp/deploy_pol.json'))['PrimToken'])")
-ETH_XAU_FEED=$(python3 -c "import json; print(json.load(open('/tmp/deploy_eth.json'))['MockXAUFeed'])")
 echo "ETH OracleAggregator: $ETH_ORACLE | MiningContract: $ETH_MINING"
 echo "POL OracleAggregator: $POL_ORACLE | MiningContract: $POL_MINING"
 cd ..
@@ -64,15 +73,16 @@ echo "=== 4. Build backend ==="
 cargo build -p verification-service --bin primora-verification 2>&1 | tail -2
 
 echo "=== 5. Start backend with dual-chain oracle submission ==="
-# Canonical read: RPC_URL + CHAINLINK_XAU_ADDRESS point at the Ethereum mock feed
-# (Decision #16 Option A). CHAIN_ID is the canonical chain. Submission fans out
-# to both ETHEREUM_* and POLYGON_* OracleAggregators (Decision 4b).
+# Canonical read: RPC_URL + CHAINLINK_XAU_ADDRESS point at the REAL Ethereum
+# Chainlink XAU feed on the mainnet fork (Decision #16 Option A). CHAIN_ID is the
+# canonical chain. Submission fans out to both ETHEREUM_* and POLYGON_*
+# OracleAggregators (Decision 4b).
 DATABASE_URL="postgres://primora:primora_dev@localhost:5432/primora" \
 REDIS_URL="redis://localhost:${REDIS_HOST_PORT}" \
 BIND_ADDR="0.0.0.0:3000" \
 CHAIN_ID="1" \
 RPC_URL="$ETH_RPC" \
-CHAINLINK_XAU_ADDRESS="$ETH_XAU_FEED" \
+CHAINLINK_XAU_ADDRESS="$CHAINLINK_XAU" \
 SIGNING_KEY_HEX="0000000000000000000000000000000000000000000000000000000000000001" \
 ETHEREUM_RPC_URL="$ETH_RPC" \
 ETHEREUM_ORACLE_SUBMITTER_KEY_HEX="ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80" \
@@ -117,7 +127,7 @@ echo "=== 10. End both sessions (triggers TWAP dual-submit) ==="
 curl -s --max-time 60 -X POST $SERVICE/sessions/$SA_ID/end -H "Content-Type: application/json" -d "{\"nonce\":\"$NONCE\"}"; echo " <- session A ended"
 curl -s --max-time 60 -X POST $SERVICE/sessions/$SB_ID/end -H "Content-Type: application/json" -d "{\"nonce\":\"$NONCE\"}"; echo " <- session B ended"
 
-echo "=== 11. Verify TWAP submitted to BOTH chains (expect initialized=true, price 320400000000) ==="
+echo "=== 11. Verify TWAP submitted to BOTH chains (expect initialized=true, live Chainlink TWAP) ==="
 echo "ETH OracleAggregator Gold price:"
 cast call $ETH_ORACLE "getPriceUnchecked(uint8)(uint256,uint256,bool)" 0 --rpc-url $ETH_RPC
 echo "POL OracleAggregator Gold price:"

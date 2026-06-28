@@ -49,13 +49,23 @@ echo "=== 1. Infra: Postgres + Redis (Redis on ${REDIS_HOST_PORT}) ==="
 docker compose -f docker-compose.yml -f "$OVERRIDE" up -d postgres redis
 sleep 5
 
-echo "=== 2. Two Anvil: :8545 (chain 1, Ethereum), :8546 (chain 137, Polygon) ==="
+echo "=== 2. Two Anvil: :8545 (chain 1, Ethereum mainnet FORK), :8546 (chain 137, Polygon) ==="
 pkill -f anvil 2>/dev/null || true
 sleep 1
-anvil --chain-id 1   --port 8545 > /tmp/anvil_eth.log  2>&1 &
+# Real Ethereum-mainnet Chainlink XAU feed; present on the fork.
+CHAINLINK_XAU="0x214eD9Da11D2fbe465a6fc601a91E62EbEc1a0D6"
+FORK_RPC="${ETH_FORK_RPC:-}"
+if [ -z "$FORK_RPC" ] && [ -f .env ]; then
+  FORK_RPC="$(grep -E '^RPC_URL=' .env | head -1 | cut -d= -f2- | tr -d '[:space:]')" || true
+fi
+[ -n "$FORK_RPC" ] || { echo "ERROR: no mainnet fork RPC. Set ETH_FORK_RPC or RPC_URL in .env" >&2; exit 1; }
+anvil --fork-url "$FORK_RPC" --chain-id 1 --port 8545 > /tmp/anvil_eth.log  2>&1 &
 anvil --chain-id 137 --port 8546 > /tmp/anvil_poly.log 2>&1 &
-sleep 3
-echo "Ethereum chain-id: $(cast chain-id --rpc-url $ETH_RPC)"
+for _ in $(seq 1 60); do
+  cast block-number --rpc-url $ETH_RPC >/dev/null 2>&1 && cast chain-id --rpc-url $POLY_RPC >/dev/null 2>&1 && break
+  sleep 1
+done
+echo "Ethereum chain-id: $(cast chain-id --rpc-url $ETH_RPC) (forked mainnet block $(cast block-number --rpc-url $ETH_RPC))"
 echo "Polygon  chain-id: $(cast chain-id --rpc-url $POLY_RPC)"
 
 echo "=== 3a. Deploy to ETHEREUM (defaults: 10k min, lock required) ==="
@@ -65,8 +75,7 @@ ETH_PRIM=$(python3 -c "import json; print(json.load(open('deployments/local.json
 ETH_STAKING=$(python3 -c "import json; print(json.load(open('deployments/local.json'))['StakingContract'])")
 ETH_MINING=$(python3 -c "import json; print(json.load(open('deployments/local.json'))['MiningContract'])")
 ETH_ORACLE=$(python3 -c "import json; print(json.load(open('deployments/local.json'))['OracleAggregator'])")
-XAU_FEED=$(python3 -c "import json; print(json.load(open('deployments/local.json'))['MockXAUFeed'])")
-echo "ETH  Prim=$ETH_PRIM Staking=$ETH_STAKING Mining=$ETH_MINING Oracle=$ETH_ORACLE XAU=$XAU_FEED"
+echo "ETH  Prim=$ETH_PRIM Staking=$ETH_STAKING Mining=$ETH_MINING Oracle=$ETH_ORACLE XAU=$CHAINLINK_XAU (real, on fork)"
 
 echo "=== 3b. Deploy to POLYGON (override: 100 PRM min, no lock) ==="
 STAKING_MIN_STAKE="$POLY_MIN_STAKE" STAKING_LOCK_REQUIRED=false \
@@ -144,7 +153,7 @@ REDIS_URL="redis://localhost:${REDIS_HOST_PORT}" \
 BIND_ADDR="0.0.0.0:3000" \
 CHAIN_ID="1" \
 RPC_URL="$ETH_RPC" \
-CHAINLINK_XAU_ADDRESS="$XAU_FEED" \
+CHAINLINK_XAU_ADDRESS="$CHAINLINK_XAU" \
 SIGNING_KEY_HEX="0000000000000000000000000000000000000000000000000000000000000001" \
 ETHEREUM_RPC_URL="$ETH_RPC" \
 ETHEREUM_ORACLE_SUBMITTER_KEY_HEX="${KEY0#0x}" \
