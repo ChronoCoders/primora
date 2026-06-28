@@ -51,11 +51,26 @@ YML
 docker compose -f docker-compose.yml -f "$OVERRIDE" up -d postgres redis
 sleep 5
 
-echo "=== 2. Two Anvil: :8545 (chain 31337, Ethereum-local), :8546 (chain 31338, Polygon-local) ==="
-nohup anvil --chain-id 31337 --port 8545 > /tmp/demo_anvil_eth.log  2>&1 &
+echo "=== 2. Two Anvil: :8545 (chain 31337, Ethereum mainnet FORK), :8546 (chain 31338, Polygon-local) ==="
+# Real Chainlink XAU/XAG feeds live on the Ethereum mainnet fork. Resolve the fork
+# RPC from ETH_FORK_RPC or RPC_URL in .env (Alchemy mainnet); never hardcode the key.
+CHAINLINK_XAU="0x214eD9Da11D2fbe465a6fc601a91E62EbEc1a0D6"
+CHAINLINK_XAG="0x379589227b15F1a12195D3f2d90bBc9F31f95235"
+FORK_RPC="${ETH_FORK_RPC:-}"
+if [ -z "$FORK_RPC" ] && [ -f .env ]; then
+  FORK_RPC="$(grep -E '^RPC_URL=' .env | head -1 | cut -d= -f2- | tr -d '[:space:]')"
+fi
+if [ -z "$FORK_RPC" ]; then
+  echo "ERROR: no mainnet fork RPC. Set ETH_FORK_RPC, or RPC_URL=<alchemy mainnet> in .env" >&2
+  exit 1
+fi
+nohup anvil --fork-url "$FORK_RPC" --chain-id 31337 --port 8545 > /tmp/demo_anvil_eth.log 2>&1 &
 nohup anvil --chain-id 31338 --port 8546 > /tmp/demo_anvil_poly.log 2>&1 &
-sleep 3
-echo "Ethereum chain-id: $(cast chain-id --rpc-url $ETH_RPC)"
+for _ in $(seq 1 60); do
+  cast block-number --rpc-url $ETH_RPC >/dev/null 2>&1 && cast chain-id --rpc-url $POLY_RPC >/dev/null 2>&1 && break
+  sleep 1
+done
+echo "Ethereum chain-id: $(cast chain-id --rpc-url $ETH_RPC) (forked mainnet block $(cast block-number --rpc-url $ETH_RPC))"
 echo "Polygon  chain-id: $(cast chain-id --rpc-url $POLY_RPC)"
 
 echo "=== 3. Deploy full suite to BOTH chains ==="
@@ -76,8 +91,6 @@ ETH_NODEREG=$(addr /tmp/demo_eth.json NodeRegistry)
 ETH_STAKING=$(addr /tmp/demo_eth.json StakingContract)
 ETH_MINING=$(addr /tmp/demo_eth.json MiningContract)
 ETH_USDC=$(addr /tmp/demo_eth.json MockUSDC)
-ETH_XAU=$(addr /tmp/demo_eth.json MockXAUFeed)
-ETH_XAG=$(addr /tmp/demo_eth.json MockXAGFeed)
 
 POLY_PRIM=$(addr /tmp/demo_poly.json PrimToken)
 POLY_HOUSE=$(addr /tmp/demo_poly.json HouseEdge)
@@ -136,10 +149,20 @@ XPT_8DEC=$(hermes_8dec "$PYTH_XPT_ID")
 WTI_8DEC=$(hermes_8dec "$PYTH_WTI_ID")
 echo "Hermes XPT(8dec)=${XPT_8DEC:-UNAVAILABLE}  WTI(8dec)=${WTI_8DEC:-UNAVAILABLE}"
 
+# Gold/Silver are read LIVE from the real Chainlink XAU/XAG feeds on the mainnet
+# fork (8-decimal answer), the same feeds the backend oracle-reader samples.
+read_chainlink_8dec() {
+  cast call "$1" "latestRoundData()(uint80,int256,uint256,uint256,uint80)" --rpc-url "$ETH_RPC" 2>/dev/null \
+    | sed -n '2p' | awk '{print $1}'
+}
+XAU_8DEC=$(read_chainlink_8dec "$CHAINLINK_XAU")
+XAG_8DEC=$(read_chainlink_8dec "$CHAINLINK_XAG")
+echo "Chainlink live: XAU(8dec)=${XAU_8DEC:-UNAVAILABLE} (~\$$(( ${XAU_8DEC:-0} / 100000000 )))  XAG(8dec)=${XAG_8DEC:-UNAVAILABLE} (~\$$(( ${XAG_8DEC:-0} / 100000000 )))"
+
 submit_prices() {
   local rpc="$1" oracle="$2"
-  cast send "$oracle" "submitPrice(uint8,uint256)" 0 320400000000 --private-key $KEY0 --rpc-url "$rpc" > /dev/null  # Gold $3204 (mock)
-  cast send "$oracle" "submitPrice(uint8,uint256)" 2 3180000000   --private-key $KEY0 --rpc-url "$rpc" > /dev/null  # Silver $31.80 (mock)
+  [ -n "$XAU_8DEC" ] && cast send "$oracle" "submitPrice(uint8,uint256)" 0 "$XAU_8DEC" --private-key $KEY0 --rpc-url "$rpc" > /dev/null  # Gold (live Chainlink)
+  [ -n "$XAG_8DEC" ] && cast send "$oracle" "submitPrice(uint8,uint256)" 2 "$XAG_8DEC" --private-key $KEY0 --rpc-url "$rpc" > /dev/null  # Silver (live Chainlink)
   [ -n "$XPT_8DEC" ] && cast send "$oracle" "submitPrice(uint8,uint256)" 1 "$XPT_8DEC" --private-key $KEY0 --rpc-url "$rpc" > /dev/null  # Platinum (live Hermes)
   [ -n "$WTI_8DEC" ] && cast send "$oracle" "submitPrice(uint8,uint256)" 3 "$WTI_8DEC" --private-key $KEY0 --rpc-url "$rpc" > /dev/null  # CrudeOil (live Hermes)
   return 0
@@ -223,8 +246,8 @@ REDIS_URL="redis://localhost:${REDIS_HOST_PORT}" \
 BIND_ADDR="0.0.0.0:3000" \
 CHAIN_ID="31337" \
 RPC_URL="$ETH_RPC" \
-CHAINLINK_XAU_ADDRESS="$ETH_XAU" \
-CHAINLINK_XAG_ADDRESS="$ETH_XAG" \
+CHAINLINK_XAU_ADDRESS="$CHAINLINK_XAU" \
+CHAINLINK_XAG_ADDRESS="$CHAINLINK_XAG" \
 SIGNING_KEY_HEX="0000000000000000000000000000000000000000000000000000000000000001" \
 ETHEREUM_RPC_URL="$ETH_RPC" \
 ETHEREUM_ORACLE_SUBMITTER_KEY_HEX="${KEY0#0x}" \
@@ -372,7 +395,7 @@ cat <<BANNER
   open http://localhost:3001  and connect the imported wallet
 
   ---- Seeded data (what the Overview should show) ----
-  Oracle & Network : XAU \$3,204 + XAG \$31.80 (Chainlink mocks); XPT + WTI LIVE from Pyth Hermes
+  Oracle & Network : ALL FOUR live -- Gold/Silver from REAL Chainlink (mainnet fork), Platinum/CrudeOil from Pyth Hermes. No mock feeds.
   Recent Payouts   : $PAYOUT_COUNT minted payout(s) -- Gold/ETH, Silver/POL, Platinum/ETH, CrudeOil/POL -- wei gross_prm + net USD
   Earnings         : all four commodities (with live feeds), net redemption USD
   Staking / Total  : Ethereum 30,000 PRM (180d) + Polygon 30,000 PRM = 60,000 staked, +boost
