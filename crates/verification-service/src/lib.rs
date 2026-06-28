@@ -140,6 +140,21 @@ pub struct EndSessionResponse {
     pub status: String,
 }
 
+/// Request body for pausing or resuming a session. The wallet is verified
+/// against the session's stored owner.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SessionControlRequest {
+    /// Owning wallet address.
+    pub wallet: String,
+}
+
+/// Response body for a pause/resume action.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SessionControlResponse {
+    /// Whether the session is paused after the action.
+    pub paused: bool,
+}
+
 /// Query parameters for the wallet payouts endpoint.
 #[derive(Debug, Deserialize)]
 pub struct PayoutsQuery {
@@ -183,6 +198,10 @@ enum ApiError {
     BadRequest(&'static str),
     /// The referenced session does not exist (or has expired).
     NotFound,
+    /// The caller is not authorized to act on this session.
+    Forbidden(&'static str),
+    /// The action conflicts with the session's current state (e.g. paused).
+    Conflict(&'static str),
     /// A rate limit was exceeded.
     RateLimited,
     /// An internal dependency failed. The cause is logged, not exposed.
@@ -194,6 +213,8 @@ impl IntoResponse for ApiError {
         let (status, message) = match self {
             Self::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
             Self::NotFound => (StatusCode::NOT_FOUND, "session not found"),
+            Self::Forbidden(msg) => (StatusCode::FORBIDDEN, msg),
+            Self::Conflict(msg) => (StatusCode::CONFLICT, msg),
             Self::RateLimited => (StatusCode::TOO_MANY_REQUESTS, "rate limit exceeded"),
             Self::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
         };
@@ -350,6 +371,9 @@ async fn submit_proof(
         .get_session(&session_id)
         .await?
         .ok_or(ApiError::NotFound)?;
+    if state.session_manager.is_paused(&session_id).await? {
+        return Err(ApiError::Conflict("session paused"));
+    }
     let proof_hash = parse_hash(&body.proof_hash, "invalid proof_hash")?;
     let proof_input = if body.proof_input.is_empty() {
         Vec::new()
@@ -821,6 +845,52 @@ async fn end_session(
     }
 }
 
+/// Loads a session and verifies the request wallet owns it, returning the
+/// session id on success. Ownership: the request `wallet` must equal the
+/// session's stored `wallet` (the address chosen at `create_session`).
+async fn authorize_session_owner(
+    state: &AppState,
+    session_id: &SessionId,
+    wallet_raw: &str,
+) -> Result<(), ApiError> {
+    let ctx = state
+        .session_manager
+        .get_session(session_id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let wallet = parse_wallet(wallet_raw)?;
+    if wallet != ctx.wallet {
+        return Err(ApiError::Forbidden("wallet does not own this session"));
+    }
+    Ok(())
+}
+
+/// Pauses a session: proof submissions are rejected (409) until resumed.
+/// Idempotent; requires the owning wallet.
+async fn pause_session(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    Json(body): Json<SessionControlRequest>,
+) -> Result<Json<SessionControlResponse>, ApiError> {
+    let session_id = SessionId(session_id);
+    authorize_session_owner(&state, &session_id, &body.wallet).await?;
+    state.session_manager.set_paused(&session_id).await?;
+    Ok(Json(SessionControlResponse { paused: true }))
+}
+
+/// Resumes a paused session: proof submissions are accepted again. Idempotent;
+/// requires the owning wallet.
+async fn resume_session(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    Json(body): Json<SessionControlRequest>,
+) -> Result<Json<SessionControlResponse>, ApiError> {
+    let session_id = SessionId(session_id);
+    authorize_session_owner(&state, &session_id, &body.wallet).await?;
+    state.session_manager.clear_paused(&session_id).await?;
+    Ok(Json(SessionControlResponse { paused: false }))
+}
+
 /// Formats an address the way `postgres-store` persists wallets
 /// (`format!("{:?}", _)`), so read queries match stored rows.
 fn wallet_db_key(wallet: &Address) -> String {
@@ -953,6 +1023,8 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions", post(create_session))
         .route("/sessions/:session_id/proofs", post(submit_proof))
         .route("/sessions/:session_id/end", post(end_session))
+        .route("/sessions/:session_id/pause", post(pause_session))
+        .route("/sessions/:session_id/resume", post(resume_session))
         .route("/wallets/:wallet/payouts", get(wallet_payouts))
         .route("/wallets/:wallet/earnings", get(wallet_earnings))
         .route("/wallets/:wallet/earnings/24h", get(wallet_earnings_24h))

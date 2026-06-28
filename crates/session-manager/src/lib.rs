@@ -58,6 +58,9 @@ pub struct SessionSummary {
     /// City of the assigned node (e.g. `Johannesburg`), if known.
     #[serde(default)]
     pub site_city: Option<String>,
+    /// Whether the session is currently paused (proofs rejected until resumed).
+    #[serde(default)]
+    pub paused: bool,
 }
 
 /// Errors returned by the session store.
@@ -413,6 +416,38 @@ impl SessionStore {
             .await
     }
 
+    /// Marks a session paused: subsequent proof submissions are rejected until
+    /// resumed. Sets the `paused:{id}` flag with the standard one-hour TTL.
+    /// Idempotent.
+    pub async fn set_paused(&self, session_id: &SessionId) -> Result<(), SessionManagerError> {
+        let mut conn = self.conn.clone();
+        let key = format!("paused:{}", session_id.0);
+        let _: () = redis::cmd("SET")
+            .arg(&key)
+            .arg(1)
+            .arg("EX")
+            .arg(TTL_SECS)
+            .query_async(&mut conn)
+            .await?;
+        Ok(())
+    }
+
+    /// Clears a session's paused flag, allowing proofs again. Idempotent.
+    pub async fn clear_paused(&self, session_id: &SessionId) -> Result<(), SessionManagerError> {
+        let mut conn = self.conn.clone();
+        let key = format!("paused:{}", session_id.0);
+        let _: () = redis::cmd("DEL").arg(&key).query_async(&mut conn).await?;
+        Ok(())
+    }
+
+    /// Returns whether a session is currently paused.
+    pub async fn is_paused(&self, session_id: &SessionId) -> Result<bool, SessionManagerError> {
+        let mut conn = self.conn.clone();
+        let key = format!("paused:{}", session_id.0);
+        let exists: bool = redis::cmd("EXISTS").arg(&key).query_async(&mut conn).await?;
+        Ok(exists)
+    }
+
     async fn incr_session_counter(&self, key: &str) -> Result<u32, SessionManagerError> {
         let mut conn = self.conn.clone();
         let count: i64 = redis::cmd("INCR").arg(key).query_async(&mut conn).await?;
@@ -497,6 +532,7 @@ impl SessionStore {
                 let avg_hashrate = self.get_average_hashrate(&session).await?;
                 let verified_proof_count = self.get_verified_proof_count(&session).await?;
                 let rejected_proof_count = self.get_rejected_proof_count(&session).await?;
+                let paused = self.is_paused(&session).await?;
                 summaries.push(SessionSummary {
                     session_id,
                     commodity: format!("{:?}", ctx.commodity),
@@ -513,6 +549,7 @@ impl SessionStore {
                     est_net_usd_cents: 0,
                     site_code: ctx.assigned_site.as_ref().map(|s| s.code.clone()),
                     site_city: ctx.assigned_site.as_ref().map(|s| s.city.clone()),
+                    paused,
                 });
             }
             cursor = next;
@@ -619,6 +656,23 @@ mod tests {
         let store = SessionStore::new(TEST_URL).await.unwrap();
         let id = SessionId("nonexistent-session-xyz".to_string());
         assert_eq!(store.get_proof_count(&id).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_pause_resume_flag() {
+        let store = SessionStore::new(TEST_URL).await.unwrap();
+        let id = store.create_session(&sample_ctx()).await.unwrap();
+        assert!(!store.is_paused(&id).await.unwrap());
+        store.set_paused(&id).await.unwrap();
+        assert!(store.is_paused(&id).await.unwrap());
+        store.set_paused(&id).await.unwrap();
+        assert!(store.is_paused(&id).await.unwrap());
+        store.clear_paused(&id).await.unwrap();
+        assert!(!store.is_paused(&id).await.unwrap());
+        store.clear_paused(&id).await.unwrap();
+        assert!(!store.is_paused(&id).await.unwrap());
+        store.delete_session(&Address::ZERO, &id).await.unwrap();
     }
 
     #[tokio::test]
