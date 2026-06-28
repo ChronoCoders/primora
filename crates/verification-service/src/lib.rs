@@ -110,7 +110,10 @@ pub struct CreateSessionResponse {
 pub struct SubmitProofRequest {
     /// Proof index within the session.
     pub sequence: u32,
-    /// Reported hashrate in H/s.
+    /// Advisory client-reported hashrate (H/s). No longer used for the session
+    /// rate, which is server-derived from difficulty and timing. Kept for
+    /// back-compat; defaults to 0 when omitted.
+    #[serde(default)]
     pub hashrate: u64,
     /// Hex-encoded proof hash: the RandomX hash of `proof_input`.
     pub proof_hash: String,
@@ -409,21 +412,12 @@ async fn submit_proof(
         }
     }
     if !matches!(result, ValidationResult::Invalid(_)) {
-        match state
+        if let Err(e) = state
             .session_manager
-            .add_hashrate_sample(&session_id, body.hashrate)
+            .record_accepted_proof(&session_id, body.difficulty, Utc::now().timestamp())
             .await
         {
-            Ok(()) => {
-                tracing::debug!(
-                    session_id = %session_id.0,
-                    hashrate = body.hashrate,
-                    "recorded hashrate sample"
-                );
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to record hashrate sample");
-            }
+            tracing::warn!(error = %e, "failed to record accepted proof for hashrate");
         }
         if let Err(e) = state.session_manager.touch_last_activity(&session_id).await {
             tracing::warn!(error = %e, "failed to update last activity");
@@ -750,17 +744,16 @@ async fn end_session(
                 (twap.session_end - twap.session_start).num_seconds().max(0) as u64;
             let payout_config = payout_calculator::default_config();
             // The average is over the bounded client-claimed hashrates: the
-            // PreFilter rejects rates above the per-client physical max
-            // (HashrateImpossible), so claimed rates cannot run unbounded.
-            // TODO(phase3-verified-hashrate): the hardened model counts
-            // node-verified RandomX solutions per unit time rather than
-            // trusting the bounded client claim.
+            // TODO(phase3-verified-hashrate): rate is server-derived from
+            // Σ difficulty / elapsed and clamped to the per-client max; phase 3
+            // counts node-verified RandomX solutions to also defeat pre-mined
+            // batch inflation.
             let avg_hashrate = state
                 .session_manager
-                .get_average_hashrate(&session_id)
+                .get_session_hashrate(&session_id, ctx.client_type)
                 .await
                 .unwrap_or_else(|e| {
-                    tracing::warn!(error = %e, "failed to read average hashrate, using 0");
+                    tracing::warn!(error = %e, "failed to read derived hashrate, using 0");
                     0
                 });
             let base_gross = payout_calculator::calculate_gross_prm(

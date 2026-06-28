@@ -14,7 +14,9 @@ const MAX_HASHRATE_CLI: u64 = 5_000;
 const TIMING_MIN_SECS: i64 = 2;
 const TIMING_MAX_SECS: i64 = 300;
 
-fn max_hashrate(client: ClientType) -> u64 {
+/// Physical-maximum hashrate (H/s) for a client type, used both as the pre-filter
+/// `HashrateImpossible` ceiling and as the clamp on the server-derived session rate.
+pub fn max_hashrate(client: ClientType) -> u64 {
     match client {
         ClientType::Browser => MAX_HASHRATE_BROWSER,
         ClientType::Desktop => MAX_HASHRATE_DESKTOP,

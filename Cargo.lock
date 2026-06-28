@@ -4451,6 +4451,7 @@ dependencies = [
  "alloy-primitives",
  "chrono",
  "common",
+ "proof-validator",
  "redis",
  "serde",
  "serde_json",

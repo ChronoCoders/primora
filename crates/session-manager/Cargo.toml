@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 common = { path = "../common" }
+proof-validator = { path = "../proof-validator" }
 redis = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

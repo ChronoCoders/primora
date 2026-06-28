@@ -4,7 +4,7 @@
 
 use alloy_primitives::Address;
 use chrono::{DateTime, Utc};
-use common::{Chain, PartialProof, SessionContext, SessionId};
+use common::{Chain, ClientType, PartialProof, SessionContext, SessionId};
 use redis::aio::MultiplexedConnection;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -263,53 +263,76 @@ impl SessionStore {
         }
     }
 
-    /// Adds a single proof's claimed hashrate to the session's running sum,
-    /// refreshing the one-hour TTL. The average over the session is this sum
-    /// divided by the proof count at session end.
-    pub async fn add_hashrate_sample(
+    /// Records an accepted proof toward the server-derived hashrate. The first
+    /// accepted proof anchors `hashrate_first_at:{id}` (write-once) and adds no
+    /// work; every subsequent accepted proof adds its `difficulty` (the expected
+    /// hash count for a linear target = U256::MAX / difficulty) to
+    /// `expected_hashes_sum:{id}`. `t_last` is the existing `last_activity:{id}`.
+    pub async fn record_accepted_proof(
         &self,
         session_id: &SessionId,
-        hashrate: u64,
+        difficulty: u64,
+        now_unix_secs: i64,
     ) -> Result<(), SessionManagerError> {
         let mut conn = self.conn.clone();
-        let key = format!("hashrate_sum:{}", session_id.0);
+        let first_key = format!("hashrate_first_at:{}", session_id.0);
+        let anchored: Option<String> = redis::cmd("SET")
+            .arg(&first_key)
+            .arg(now_unix_secs)
+            .arg("NX")
+            .arg("EX")
+            .arg(TTL_SECS)
+            .query_async(&mut conn)
+            .await?;
+        if anchored.is_some() {
+            return Ok(());
+        }
+        let sum_key = format!("expected_hashes_sum:{}", session_id.0);
         let _: i64 = redis::cmd("INCRBY")
-            .arg(&key)
-            .arg(hashrate)
+            .arg(&sum_key)
+            .arg(difficulty)
             .query_async(&mut conn)
             .await?;
         let _: () = redis::cmd("EXPIRE")
-            .arg(&key)
+            .arg(&sum_key)
             .arg(TTL_SECS)
             .query_async(&mut conn)
             .await?;
         Ok(())
     }
 
-    /// Returns the integer average claimed hashrate over the session: the
-    /// accumulated hashrate sum divided by the proof count. Returns 0 when no
-    /// proofs have been counted.
-    pub async fn get_average_hashrate(
+    /// Returns the server-derived session hashrate in H/s: total expected hashes
+    /// (`expected_hashes_sum`) divided by elapsed server time
+    /// (`last_activity − hashrate_first_at`), clamped to the per-client physical
+    /// maximum. Returns 0 until at least two accepted proofs establish a real
+    /// elapsed window. Derived from `difficulty` and server timestamps, never
+    /// from any client-reported hashrate.
+    pub async fn get_session_hashrate(
         &self,
         session_id: &SessionId,
+        client_type: ClientType,
     ) -> Result<u64, SessionManagerError> {
         let mut conn = self.conn.clone();
-        let sum_key = format!("hashrate_sum:{}", session_id.0);
-        let count_key = format!("proof_count:{}", session_id.0);
+        let first: Option<i64> = redis::cmd("GET")
+            .arg(format!("hashrate_first_at:{}", session_id.0))
+            .query_async(&mut conn)
+            .await?;
+        let last: Option<i64> = redis::cmd("GET")
+            .arg(format!("last_activity:{}", session_id.0))
+            .query_async(&mut conn)
+            .await?;
         let sum: Option<i64> = redis::cmd("GET")
-            .arg(&sum_key)
+            .arg(format!("expected_hashes_sum:{}", session_id.0))
             .query_async(&mut conn)
             .await?;
-        let count: Option<i64> = redis::cmd("GET")
-            .arg(&count_key)
-            .query_async(&mut conn)
-            .await?;
-        let count = count.unwrap_or(0).max(0) as u64;
-        if count == 0 {
-            return Ok(0);
+        match (first, last, sum) {
+            (Some(first), Some(last), Some(sum)) if last > first && sum > 0 => {
+                let elapsed = (last - first).max(1) as u64;
+                let rate = sum.max(0) as u64 / elapsed;
+                Ok(rate.min(proof_validator::max_hashrate(client_type)))
+            }
+            _ => Ok(0),
         }
-        let sum = sum.unwrap_or(0).max(0) as u64;
-        Ok(sum / count)
     }
 
     /// Records the current UTC time as the session's last activity, stored as
@@ -529,7 +552,9 @@ impl SessionStore {
                     redis::cmd("GET").arg(&count_key).query_async(&mut conn).await?;
                 let session = SessionId(session_id.clone());
                 let last_submission_at = self.get_last_activity(&session).await?;
-                let avg_hashrate = self.get_average_hashrate(&session).await?;
+                let avg_hashrate = self
+                    .get_session_hashrate(&session, ctx.client_type)
+                    .await?;
                 let verified_proof_count = self.get_verified_proof_count(&session).await?;
                 let rejected_proof_count = self.get_rejected_proof_count(&session).await?;
                 let paused = self.is_paused(&session).await?;
@@ -572,7 +597,8 @@ impl SessionStore {
         let commit_key = format!("commit:{}", session_id.0);
         let count_key = format!("proof_count:{}", session_id.0);
         let proofs_key = format!("proofs:{}", session_id.0);
-        let hashrate_key = format!("hashrate_sum:{}", session_id.0);
+        let first_at_key = format!("hashrate_first_at:{}", session_id.0);
+        let expected_hashes_key = format!("expected_hashes_sum:{}", session_id.0);
         let activity_key = format!("last_activity:{}", session_id.0);
         let _: () = redis::cmd("DEL")
             .arg(&session_key)
@@ -580,7 +606,8 @@ impl SessionStore {
             .arg(&commit_key)
             .arg(&count_key)
             .arg(&proofs_key)
-            .arg(&hashrate_key)
+            .arg(&first_at_key)
+            .arg(&expected_hashes_key)
             .arg(&activity_key)
             .query_async(&mut conn)
             .await?;
@@ -692,10 +719,16 @@ mod tests {
 
     #[tokio::test]
     #[ignore]
-    async fn test_average_hashrate_missing_is_zero() {
+    async fn test_session_hashrate_missing_is_zero() {
         let store = SessionStore::new(TEST_URL).await.unwrap();
         let id = SessionId("nonexistent-hashrate-xyz".to_string());
-        assert_eq!(store.get_average_hashrate(&id).await.unwrap(), 0);
+        assert_eq!(
+            store
+                .get_session_hashrate(&id, ClientType::Desktop)
+                .await
+                .unwrap(),
+            0
+        );
     }
 
     #[tokio::test]
@@ -734,14 +767,58 @@ mod tests {
 
     #[tokio::test]
     #[ignore]
-    async fn test_hashrate_average() {
+    async fn test_session_hashrate_single_proof_is_zero() {
         let store = SessionStore::new(TEST_URL).await.unwrap();
         let id = store.create_session(&sample_ctx()).await.unwrap();
-        for hashrate in [1000u64, 2000, 3000] {
-            store.add_hashrate_sample(&id, hashrate).await.unwrap();
-            store.increment_proof_count(&id).await.unwrap();
-        }
-        assert_eq!(store.get_average_hashrate(&id).await.unwrap(), 2000);
+        let now = Utc::now().timestamp();
+        store.record_accepted_proof(&id, 30_000, now).await.unwrap();
+        store.touch_last_activity(&id).await.unwrap();
+        assert_eq!(
+            store
+                .get_session_hashrate(&id, ClientType::Desktop)
+                .await
+                .unwrap(),
+            0
+        );
+        store.delete_session(&Address::ZERO, &id).await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_session_hashrate_derived() {
+        let store = SessionStore::new(TEST_URL).await.unwrap();
+        let id = store.create_session(&sample_ctx()).await.unwrap();
+        let now = Utc::now().timestamp();
+        store.record_accepted_proof(&id, 0, now - 100).await.unwrap();
+        store.record_accepted_proof(&id, 300_000, now).await.unwrap();
+        store.touch_last_activity(&id).await.unwrap();
+        let rate = store
+            .get_session_hashrate(&id, ClientType::Desktop)
+            .await
+            .unwrap();
+        assert!((2_900..=3_050).contains(&rate), "rate {rate} out of band");
+        store.delete_session(&Address::ZERO, &id).await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_session_hashrate_clamped_to_max() {
+        let store = SessionStore::new(TEST_URL).await.unwrap();
+        let id = store.create_session(&sample_ctx()).await.unwrap();
+        let now = Utc::now().timestamp();
+        store.record_accepted_proof(&id, 0, now - 1).await.unwrap();
+        store
+            .record_accepted_proof(&id, 10_000_000, now)
+            .await
+            .unwrap();
+        store.touch_last_activity(&id).await.unwrap();
+        assert_eq!(
+            store
+                .get_session_hashrate(&id, ClientType::Desktop)
+                .await
+                .unwrap(),
+            4_000
+        );
         store.delete_session(&Address::ZERO, &id).await.unwrap();
     }
 }

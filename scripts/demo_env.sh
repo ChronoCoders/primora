@@ -249,8 +249,10 @@ run_and_mint() {
     -d "{\"wallet\":\"$ADDR0\",\"client_type\":\"desktop\",\"commodity\":\"$commodity\",\"chain\":\"$chain_name\",\"assigned_node_id\":\"node-a\",\"commit_hash\":\"$commit\",\"cpu_threads\":$CPU_THREADS}")
   sid=$(echo "$sess" | python3 -c "import json,sys; print(json.load(sys.stdin)['session_id'])")
   curl -s -X POST $SERVICE/sessions/$sid/proofs -H "Content-Type: application/json" \
-    -d "{\"sequence\":1,\"hashrate\":2500,\"proof_hash\":\"$PROOF_HASH\",\"proof_input\":\"$PROOF_INPUT\",\"difficulty\":1}" > /dev/null
-  sleep 3
+    -d "{\"sequence\":1,\"proof_hash\":\"$PROOF_HASH\",\"proof_input\":\"$PROOF_INPUT\",\"difficulty\":1}" > /dev/null
+  sleep 5
+  curl -s -X POST $SERVICE/sessions/$sid/proofs -H "Content-Type: application/json" \
+    -d "{\"sequence\":2,\"proof_hash\":\"$PROOF_HASH\",\"proof_input\":\"$PROOF_INPUT\",\"difficulty\":19000}" > /dev/null
   local end
   end=$(curl -s --max-time 90 -X POST $SERVICE/sessions/$sid/end -H "Content-Type: application/json" -d "{\"nonce\":\"$nonce\"}")
   if ! echo "$end" | grep -q "completed"; then
@@ -285,16 +287,20 @@ else
   echo "  skipped: Pyth WTI feed unavailable (contract may be expired)"
 fi
 
-echo "=== 15. Leave one ACTIVE session (Gold/Ethereum, 3,842 H/s, NOT ended) ==="
+echo "=== 15. Leave one ACTIVE session (Gold/Ethereum, server-derived hashrate, NOT ended) ==="
 ACOMMIT=$(python3 -c "import hashlib; print(hashlib.sha256(bytes.fromhex('99')).hexdigest())")
 ASESS=$(curl -s -X POST $SERVICE/sessions -H "Content-Type: application/json" \
   -d "{\"wallet\":\"$ADDR0\",\"client_type\":\"desktop\",\"commodity\":\"Gold\",\"chain\":\"ethereum\",\"assigned_node_id\":\"node-a\",\"commit_hash\":\"$ACOMMIT\",\"cpu_threads\":$CPU_THREADS}")
 ASID=$(echo "$ASESS" | python3 -c "import json,sys; print(json.load(sys.stdin)['session_id'])")
-for seq in 1 2; do
-  curl -s -X POST $SERVICE/sessions/$ASID/proofs -H "Content-Type: application/json" \
-    -d "{\"sequence\":$seq,\"hashrate\":3842,\"proof_hash\":\"$PROOF_HASH\",\"proof_input\":\"$PROOF_INPUT\",\"difficulty\":1}" > /dev/null
-done
-echo "active session $ASID left running (avg 3,842 H/s, Gold, ethereum)"
+curl -s -X POST $SERVICE/sessions/$ASID/proofs -H "Content-Type: application/json" \
+  -d "{\"sequence\":1,\"proof_hash\":\"$PROOF_HASH\",\"proof_input\":\"$PROOF_INPUT\",\"difficulty\":1}" > /dev/null
+sleep 5
+curl -s -X POST $SERVICE/sessions/$ASID/proofs -H "Content-Type: application/json" \
+  -d "{\"sequence\":2,\"proof_hash\":\"$PROOF_HASH\",\"proof_input\":\"$PROOF_INPUT\",\"difficulty\":19000}" > /dev/null
+sleep 5
+curl -s -X POST $SERVICE/sessions/$ASID/proofs -H "Content-Type: application/json" \
+  -d "{\"sequence\":3,\"proof_hash\":\"$PROOF_HASH\",\"proof_input\":\"$PROOF_INPUT\",\"difficulty\":19000}" > /dev/null
+echo "active session $ASID left running (server-derived hashrate, Gold, ethereum)"
 
 echo "=== 16. Frontend .env.local ==="
 # A real WalletConnect projectId is required: an invalid/placeholder id makes
@@ -349,8 +355,8 @@ cat <<BANNER
   Earnings         : all four commodities (with live feeds), net redemption USD
   Staking / Total  : Ethereum 30,000 PRM (180d) + Polygon 30,000 PRM = 60,000 staked, +boost
   Reserve Health   : $RESERVE_OK
-  Mining Speed     : 3,842 H/s (active session)
-  Active Mining    : LIVE Gold session on Ethereum (avg 3,842 H/s)
+  Mining Speed     : server-derived from proof difficulty / elapsed (~3,800 H/s, capped at 4,000)
+  Active Mining    : LIVE Gold session on Ethereum (server-derived hashrate)
   Entity Share KPI : still placeholder (no data source defined yet)
 
   Commodities: all four mined -- Gold/Silver from local Chainlink mock feeds,
