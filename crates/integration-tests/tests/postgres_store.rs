@@ -57,6 +57,7 @@ async fn test_insert_and_update_mint_proposal() {
             session_id: session_id.clone(),
             signatures: Vec::new(),
             node_ids: Vec::new(),
+            signers: Vec::new(),
             proof_hash: [0u8; 32],
             timestamp: Utc::now(),
         },

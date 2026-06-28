@@ -66,6 +66,29 @@ fn parse_node_endpoints(raw: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Parses the `NODE_SIGNERS` map (`node_id=0xADDRESS`, comma-separated) into each
+/// node's registered signing address. Entries without a valid `node_id=0x...`
+/// pair are logged and skipped rather than failing startup.
+fn parse_node_signers(raw: &str) -> HashMap<NodeId, Address> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .filter_map(|entry| match entry.split_once('=') {
+            Some((id, addr)) => match Address::from_str(addr.trim()) {
+                Ok(address) => Some((NodeId(id.trim().to_string()), address)),
+                Err(_) => {
+                    tracing::warn!(entry, "invalid NODE_SIGNERS address; skipping");
+                    None
+                }
+            },
+            None => {
+                tracing::warn!(entry, "NODE_SIGNERS entry not in node_id=address form; skipping");
+                None
+            }
+        })
+        .collect()
+}
+
 /// Parses the `NODE_SITES` JSON map (node id -> site metadata). An empty or
 /// malformed value logs a warning and yields an empty map rather than failing.
 fn parse_node_sites(raw: &str) -> HashMap<String, NodeSite> {
@@ -366,7 +389,11 @@ async fn main() {
             "fewer attestation nodes than the 3-of-4 quorum needs; attestation will fail to reach quorum until at least {ATTESTATION_NODE_COUNT} nodes are configured"
         );
     }
-    let node_coordinator = NodeCoordinator::new(node_clients, node_ids);
+    let node_signers = parse_node_signers(&optional("NODE_SIGNERS", ""));
+    if node_signers.is_empty() {
+        tracing::warn!("NODE_SIGNERS is empty; no attestation signature can be verified, so attestation cannot reach quorum");
+    }
+    let node_coordinator = NodeCoordinator::new(node_clients, node_ids, node_signers);
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<AnomalyEvent>(ANOMALY_CHANNEL_CAPACITY);
     tokio::spawn(async move {

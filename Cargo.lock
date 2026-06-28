@@ -2938,6 +2938,7 @@ dependencies = [
 name = "node-coordinator"
 version = "0.1.0"
 dependencies = [
+ "alloy",
  "alloy-primitives",
  "chrono",
  "common",

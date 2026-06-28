@@ -10,10 +10,13 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true }
 sha2 = { workspace = true }
-alloy-primitives = { workspace = true }
+alloy-primitives = { workspace = true, features = ["k256"] }
 tonic = { workspace = true }
 prost = { workspace = true }
 prost-types = { workspace = true }
+
+[dev-dependencies]
+alloy = { workspace = true }
 
 [build-dependencies]
 tonic-build = "0.12"

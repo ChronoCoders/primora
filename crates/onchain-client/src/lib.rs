@@ -466,6 +466,7 @@ mod tests {
                 session_id: SessionId("0".to_string()),
                 signatures: Vec::new(),
                 node_ids: Vec::new(),
+                signers: Vec::new(),
                 proof_hash: [0u8; 32],
                 timestamp: epoch(),
             },

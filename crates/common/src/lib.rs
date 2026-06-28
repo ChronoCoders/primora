@@ -271,6 +271,10 @@ pub struct AttestationResult {
     pub signatures: Vec<NodeSignature>,
     /// Node identifiers parallel to `signatures`.
     pub node_ids: Vec<NodeId>,
+    /// Recovered, registered signer addresses parallel to `signatures` (the
+    /// distinct verified identities counted toward quorum).
+    #[serde(default)]
+    pub signers: Vec<Address>,
     /// Attested proof hash.
     pub proof_hash: [u8; 32],
     /// Attestation timestamp.

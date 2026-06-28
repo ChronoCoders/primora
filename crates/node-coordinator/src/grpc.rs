@@ -111,9 +111,11 @@ impl NodeClient for GrpcNodeClient {
             NodeCoordinatorError::NodeError("attestation response missing signature".to_string())
         })?;
 
-        // TODO(phase3-attestation-identity): recover the signer address from this
-        // signature and check it against the expected node identity. Today the
-        // signature is only parsed for format and counted toward quorum.
+        // The coordinator recovers the signer over the proof hash and counts it
+        // only when it matches the node's registered signing address (see
+        // coordinate_attestation). TODO(phase3-onchain-signers): source the
+        // registered signing addresses from the on-chain NodeRegistry rather than
+        // the NODE_SIGNERS backend config.
         let signature = Signature::try_from(signature_proto.signature.as_slice()).map_err(|err| {
             NodeCoordinatorError::NodeError(format!("invalid signature bytes: {err}"))
         })?;
