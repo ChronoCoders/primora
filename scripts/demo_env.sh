@@ -191,13 +191,31 @@ PROOF_INPUT=$(echo "$GEN" | sed -n '1p')
 PROOF_HASH=$(echo "$GEN" | sed -n '2p')
 echo "proof_input=$PROOF_INPUT proof_hash=$PROOF_HASH"
 
-echo "=== 10. Start node-server (real attestation) ==="
-BIND_ADDR="127.0.0.1:50051" NODE_API_KEY="devkey" NODE_SIGNING_KEY_HEX="${NODE_KEY#0x}" NODE_ID="node-demo" LOG_LEVEL="info" \
-  nohup ./target/debug/primora-node > /tmp/demo_node.log 2>&1 &
-for i in $(seq 1 60); do
-  grep -q "primora node starting" /tmp/demo_node.log 2>/dev/null && { echo "node ready"; break; }
-  sleep 1
-done
+echo "=== 10. Start 4 node-servers (genuine 3-of-4 attestation) ==="
+NODE1_KEY="0x00000000000000000000000000000000000000000000000000000000000000a1"
+NODE2_KEY="0x00000000000000000000000000000000000000000000000000000000000000a2"
+NODE3_KEY="0x00000000000000000000000000000000000000000000000000000000000000a3"
+NODE4_KEY="0x00000000000000000000000000000000000000000000000000000000000000a4"
+NODE1_ADDR=$(cast wallet address --private-key "$NODE1_KEY")
+NODE2_ADDR=$(cast wallet address --private-key "$NODE2_KEY")
+NODE3_ADDR=$(cast wallet address --private-key "$NODE3_KEY")
+NODE4_ADDR=$(cast wallet address --private-key "$NODE4_KEY")
+start_node() {
+  local id="$1" port="$2" key="$3"
+  BIND_ADDR="127.0.0.1:$port" NODE_API_KEY="devkey" NODE_SIGNING_KEY_HEX="${key#0x}" NODE_ID="$id" LOG_LEVEL="info" \
+    nohup ./target/debug/primora-node > "/tmp/demo_${id}.log" 2>&1 &
+  for _ in $(seq 1 60); do
+    grep -q "primora node starting" "/tmp/demo_${id}.log" 2>/dev/null && { echo "  $id ready on :$port"; return 0; }
+    sleep 1
+  done
+  echo "  $id FAILED to start on :$port" >&2
+  return 1
+}
+start_node "node-1" 50051 "$NODE1_KEY"
+start_node "node-2" 50052 "$NODE2_KEY"
+start_node "node-3" 50053 "$NODE3_KEY"
+start_node "node-4" 50054 "$NODE4_KEY"
+echo "node signers: node-1=$NODE1_ADDR node-2=$NODE2_ADDR node-3=$NODE3_ADDR node-4=$NODE4_ADDR"
 
 echo "=== 11. Start verification-service (full dual-chain config) ==="
 DATABASE_URL="postgres://primora:primora_dev@localhost:5432/primora" \
@@ -216,9 +234,10 @@ POLYGON_RPC_URL="$POLY_RPC" \
 POLYGON_ORACLE_SUBMITTER_KEY_HEX="${KEY0#0x}" \
 POLYGON_ORACLE_AGGREGATOR_ADDRESS="$POLY_ORACLE" \
 POLYGON_STAKING_ADDRESS="$POLY_STAKING" \
-NODE_ENDPOINTS="http://localhost:50051" \
+NODE_ENDPOINTS="node-1=http://localhost:50051,node-2=http://localhost:50052,node-3=http://localhost:50053,node-4=http://localhost:50054" \
+NODE_SIGNERS="node-1=$NODE1_ADDR,node-2=$NODE2_ADDR,node-3=$NODE3_ADDR,node-4=$NODE4_ADDR" \
 NODE_API_KEY="devkey" \
-NODE_SITES='{"node-a":{"code":"JHB","city":"Johannesburg","country":"ZA"}}' \
+NODE_SITES='{"node-1":{"code":"JHB","city":"Johannesburg","country":"ZA"},"node-2":{"code":"AMS","city":"Amsterdam","country":"NL"},"node-3":{"code":"DFW","city":"Dallas","country":"US"},"node-4":{"code":"WAW","city":"Warsaw","country":"PL"}}' \
 LOG_LEVEL="info" \
   nohup ./target/debug/primora-verification > /tmp/demo_backend.log 2>&1 &
 sleep 5
@@ -246,7 +265,7 @@ run_and_mint() {
   local commit sess sid pid
   commit=$(python3 -c "import hashlib; print(hashlib.sha256(bytes.fromhex('$nonce')).hexdigest())")
   sess=$(curl -s -X POST $SERVICE/sessions -H "Content-Type: application/json" \
-    -d "{\"wallet\":\"$ADDR0\",\"client_type\":\"desktop\",\"commodity\":\"$commodity\",\"chain\":\"$chain_name\",\"assigned_node_id\":\"node-a\",\"commit_hash\":\"$commit\",\"cpu_threads\":$CPU_THREADS}")
+    -d "{\"wallet\":\"$ADDR0\",\"client_type\":\"desktop\",\"commodity\":\"$commodity\",\"chain\":\"$chain_name\",\"assigned_node_id\":\"node-1\",\"commit_hash\":\"$commit\",\"cpu_threads\":$CPU_THREADS}")
   sid=$(echo "$sess" | python3 -c "import json,sys; print(json.load(sys.stdin)['session_id'])")
   curl -s -X POST $SERVICE/sessions/$sid/proofs -H "Content-Type: application/json" \
     -d "{\"sequence\":1,\"proof_hash\":\"$PROOF_HASH\",\"proof_input\":\"$PROOF_INPUT\",\"difficulty\":1}" > /dev/null
@@ -290,7 +309,7 @@ fi
 echo "=== 15. Leave one ACTIVE session (Gold/Ethereum, server-derived hashrate, NOT ended) ==="
 ACOMMIT=$(python3 -c "import hashlib; print(hashlib.sha256(bytes.fromhex('99')).hexdigest())")
 ASESS=$(curl -s -X POST $SERVICE/sessions -H "Content-Type: application/json" \
-  -d "{\"wallet\":\"$ADDR0\",\"client_type\":\"desktop\",\"commodity\":\"Gold\",\"chain\":\"ethereum\",\"assigned_node_id\":\"node-a\",\"commit_hash\":\"$ACOMMIT\",\"cpu_threads\":$CPU_THREADS}")
+  -d "{\"wallet\":\"$ADDR0\",\"client_type\":\"desktop\",\"commodity\":\"Gold\",\"chain\":\"ethereum\",\"assigned_node_id\":\"node-1\",\"commit_hash\":\"$ACOMMIT\",\"cpu_threads\":$CPU_THREADS}")
 ASID=$(echo "$ASESS" | python3 -c "import json,sys; print(json.load(sys.stdin)['session_id'])")
 curl -s -X POST $SERVICE/sessions/$ASID/proofs -H "Content-Type: application/json" \
   -d "{\"sequence\":1,\"proof_hash\":\"$PROOF_HASH\",\"proof_input\":\"$PROOF_INPUT\",\"difficulty\":1}" > /dev/null
@@ -333,6 +352,9 @@ cat <<BANNER
   Backend API : http://localhost:3000   (health: $(curl -s $SERVICE/health))
   Ethereum RPC: http://localhost:8545    (chain-id 31337)
   Polygon  RPC: http://localhost:8546    (chain-id 31338)
+  Attestation : genuine 3-of-4 BFT quorum across 4 node-servers (:50051-:50054,
+                distinct signing keys); mints require 3 distinct verified node
+                signatures (ecrecover over proof_hash vs NODE_SIGNERS).
 
   Demo user   : $ADDR0
   Private key : $KEY0

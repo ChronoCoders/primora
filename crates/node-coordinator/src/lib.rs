@@ -234,6 +234,12 @@ impl<C: NodeClient> NodeCoordinator<C> {
         };
 
         if result.is_sufficient() {
+            tracing::info!(
+                session_id = %result.session_id.0,
+                count = result.signers.len(),
+                signers = ?result.signers,
+                "attestation quorum reached with distinct verified registered signers"
+            );
             Ok(result)
         } else {
             Err(NodeCoordinatorError::InsufficientAttestations {
