@@ -56,8 +56,10 @@ impl MintCeilingCalculator {
     /// Returns the whole-PRM daily mint ceiling for the given inputs: the daily
     /// target scaled by the safety multiplier (`active_users ×
     /// avg_daily_prm_per_user × safety_multiplier`). Saturating to avoid overflow
-    /// on extreme inputs. This is the backend's per-day cap, stricter than the
-    /// on-chain per-block ceiling.
+    /// on extreme inputs. This is the backend's per-day aggregate cap, a distinct
+    /// layer from `MiningContract.mintCeilingPerBlock` (deployed `1_000_000e18`),
+    /// which bounds a single block; the two guards are independent and do not
+    /// share a value.
     pub fn daily_ceiling(&self, active_users: u64, avg_daily_prm_per_user: u64) -> u64 {
         active_users
             .saturating_mul(avg_daily_prm_per_user)

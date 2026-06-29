@@ -2,6 +2,16 @@
 #![deny(missing_docs)]
 //! Spec Section 4.6 payout formula: gross PRM, USD redemption, house edge, and
 //! staking boost, computed entirely in scaled `u128` integers.
+//!
+//! On-chain authority (verified against deployed contracts, audit item #6): the
+//! house-edge default mirrors `HouseEdge.DEFAULT_EDGE_BPS`, the boost cap mirrors
+//! `StakingContract.MAX_BOOST_BPS`, the boost tiers mirror
+//! `StakingContract.baseBoostBps`, and the lock multipliers mirror
+//! `StakingContract.lockMultiplier` (`MULT_30`/`MULT_90`/`MULT_180`). The
+//! commodity multipliers, difficulty multipliers, calibration coefficients, and
+//! [`PRM_REFERENCE_PRICE_8DEC`] have no on-chain counterpart and are
+//! backend-authoritative by design (the contracts mint a final wei amount; they
+//! never recompute the payout).
 
 use common::Commodity;
 
@@ -13,7 +23,8 @@ const PRICE_COEFFICIENT_SCALE: u128 = 1_000_000_000_000_000;
 const TWAP_DECIMALS_SCALE: u128 = 100_000_000;
 /// Scale factor of a 6-decimal USDC amount.
 const USDC_SCALE: u128 = 1_000_000;
-/// Basis-point denominator (`10_000` bps = `100%`).
+/// Basis-point denominator (`10_000` bps = `100%`); matches the
+/// `BPS_DENOMINATOR` constant in `HouseEdge`, `StakingContract`, and `Treasury`.
 const BPS_DENOMINATOR: u128 = 10_000;
 
 /// Factor converting a calibration-scaled gross PRM value (human PRM x 10^5, the
@@ -62,7 +73,12 @@ pub struct PayoutConfig {
     pub base_coefficient_scaled: u128,
     /// Price coefficient scaled by 1_000_000_000_000_000 (1e15).
     pub price_coefficient_scaled: u128,
-    /// House edge in basis points (1700 = 17%).
+    /// House edge in basis points (1700 = 17%). Mirrors
+    /// `HouseEdge.DEFAULT_EDGE_BPS` (bounds `MIN_EDGE_BPS` 1_000 ..
+    /// `MAX_EDGE_BPS` 2_500). The on-chain edge is governance- and
+    /// reserve-adjustable (timelocked, dynamic 22%/24%); this default tracks the
+    /// contract default and drives off-chain net-USD figures, not on-chain
+    /// enforcement (the live edge is applied by `HouseEdge`/`Treasury`).
     pub house_edge_bps: u128,
 }
 
@@ -88,7 +104,8 @@ pub fn default_config() -> PayoutConfig {
     }
 }
 
-/// Returns the redemption multiplier for `commodity`, scaled by 10.
+/// Returns the redemption multiplier for `commodity`, scaled by 10. Backend-only
+/// (Spec 4.6 valuation); no on-chain counterpart.
 pub fn commodity_multiplier(commodity: &Commodity) -> u128 {
     match commodity {
         Commodity::Gold => 32,
@@ -98,7 +115,8 @@ pub fn commodity_multiplier(commodity: &Commodity) -> u128 {
     }
 }
 
-/// Returns the mining difficulty for `commodity`, scaled by 10.
+/// Returns the mining difficulty for `commodity`, scaled by 10. Backend-only
+/// (Spec 4.6 valuation); no on-chain counterpart.
 pub fn commodity_difficulty(commodity: &Commodity) -> u128 {
     match commodity {
         Commodity::Gold => 40,
@@ -152,7 +170,8 @@ pub fn apply_staking_boost(gross_prm: u128, boost_bps: u32) -> u128 {
 
 /// One PRM token in wei (18 decimals), used for the staking tier thresholds.
 const PRM: u128 = 1_000_000_000_000_000_000;
-/// Hard cap on the effective staking boost (40%), mirroring StakingContract.sol.
+/// Hard cap on the effective staking boost (40%); mirrors
+/// `StakingContract.MAX_BOOST_BPS`.
 pub const MAX_BOOST_BPS: u32 = 4_000;
 /// Lock-multiplier scale factor (a multiplier of `130` means 1.3x).
 const LOCK_MULT_SCALE: u32 = 100;
@@ -175,8 +194,10 @@ pub fn base_boost_bps(total_staked: u128) -> u32 {
 }
 
 /// Returns the lock multiplier scaled by 100 for an enum ordinal lock period
-/// (0=30d, 1=90d, 2=180d), matching `StakingContract.lockMultiplier` (Spec 6.5).
-/// Any other ordinal defaults to 1.0x.
+/// (0=30d, 1=90d, 2=180d), matching `StakingContract.lockMultiplier` (Spec 6.5):
+/// `MULT_30`=100, `MULT_90`=130, `MULT_180`=160. The ordinals are the
+/// `StakingContract.LockPeriod` enum order (Days30=0, Days90=1, Days180=2); any
+/// other ordinal defaults to 1.0x.
 pub fn lock_multiplier_scaled(lock_period: u8) -> u32 {
     match lock_period {
         0 => 100,
