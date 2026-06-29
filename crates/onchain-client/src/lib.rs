@@ -179,6 +179,17 @@ impl OnchainClient {
 pub struct OracleSubmitter {
     provider: DynProvider,
     aggregator_address: Address,
+    signer_address: Address,
+}
+
+/// Maximum re-fetch-and-retry attempts when a submit fails on a nonce conflict.
+const MAX_NONCE_RETRIES: u32 = 5;
+
+/// True when an RPC/contract error message indicates a nonce conflict that a
+/// fresh nonce fetch can resolve (stale, reused, or known nonce).
+fn is_nonce_error(message: &str) -> bool {
+    let m = message.to_ascii_lowercase();
+    m.contains("nonce") || m.contains("already known") || m.contains("replacement transaction underpriced")
 }
 
 impl OracleSubmitter {
@@ -193,17 +204,25 @@ impl OracleSubmitter {
         let url = rpc_url
             .parse()
             .map_err(|_| OnchainClientError::InvalidUrl(rpc_url.to_string()))?;
+        let signer_address = signing_key.address();
         let wallet = EthereumWallet::from(signing_key);
         let provider = ProviderBuilder::new().wallet(wallet).connect_http(url).erased();
         Ok(Self {
             provider,
             aggregator_address,
+            signer_address,
         })
     }
 
     /// Submits a normalized 8-decimal `price` for `commodity` (the contract enum
-    /// ordinal) to the OracleAggregator and returns the transaction hash. A
-    /// divergence rejection or any other revert maps to
+    /// ordinal) to the OracleAggregator and returns the transaction hash.
+    ///
+    /// Each attempt fetches the signer's pending nonce from this chain immediately
+    /// before sending and sets it explicitly, so the submitter is correct as the
+    /// sole production writer and resilient to concurrent writers. A nonce
+    /// conflict re-fetches the nonce and retries (up to [`MAX_NONCE_RETRIES`]).
+    /// Each `OracleSubmitter` is per-chain, so nonces are never shared across
+    /// chains. A divergence rejection or other revert maps to
     /// [`OnchainClientError::Contract`].
     pub async fn submit_price(
         &self,
@@ -211,20 +230,46 @@ impl OracleSubmitter {
         price: u128,
     ) -> Result<TxHash, OnchainClientError> {
         let contract = IOracleAggregator::new(self.aggregator_address, &self.provider);
-        let receipt = contract
-            .submitPrice(commodity, U256::from(price))
-            .send()
-            .await
-            .map_err(|e| OnchainClientError::Contract(e.to_string()))?
-            .get_receipt()
-            .await
-            .map_err(|e| OnchainClientError::Contract(e.to_string()))?;
-        if !receipt.status() {
-            return Err(OnchainClientError::Contract("transaction reverted".into()));
+        let mut attempt: u32 = 0;
+        loop {
+            let nonce = self
+                .provider
+                .get_transaction_count(self.signer_address)
+                .pending()
+                .await
+                .map_err(|e| OnchainClientError::Contract(e.to_string()))?;
+            let send_result = async {
+                let pending = contract
+                    .submitPrice(commodity, U256::from(price))
+                    .nonce(nonce)
+                    .send()
+                    .await
+                    .map_err(|e| OnchainClientError::Contract(e.to_string()))?;
+                pending
+                    .get_receipt()
+                    .await
+                    .map_err(|e| OnchainClientError::Contract(e.to_string()))
+            }
+            .await;
+            match send_result {
+                Ok(receipt) => {
+                    if !receipt.status() {
+                        return Err(OnchainClientError::Contract("transaction reverted".into()));
+                    }
+                    let tx_hash = receipt.transaction_hash;
+                    tracing::info!(commodity = %commodity, price = %price, nonce = %nonce, tx_hash = %tx_hash, "submitted price to oracle aggregator");
+                    return Ok(tx_hash);
+                }
+                Err(OnchainClientError::Contract(message))
+                    if is_nonce_error(&message) && attempt < MAX_NONCE_RETRIES =>
+                {
+                    attempt += 1;
+                    tracing::warn!(commodity = %commodity, attempt, nonce = %nonce, error = %message, "nonce conflict on submitPrice; refetching nonce and retrying");
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
         }
-        let tx_hash = receipt.transaction_hash;
-        tracing::info!(commodity = %commodity, price = %price, tx_hash = %tx_hash, "submitted price to oracle aggregator");
-        Ok(tx_hash)
     }
 }
 
@@ -507,6 +552,16 @@ mod tests {
         assert_eq!(commodity_to_u8(&Commodity::Platinum), 1);
         assert_eq!(commodity_to_u8(&Commodity::Silver), 2);
         assert_eq!(commodity_to_u8(&Commodity::CrudeOil), 3);
+    }
+
+    #[test]
+    fn test_is_nonce_error() {
+        assert!(is_nonce_error("server returned an error response: error code -32003: nonce too low"));
+        assert!(is_nonce_error("Nonce too high"));
+        assert!(is_nonce_error("already known"));
+        assert!(is_nonce_error("replacement transaction underpriced"));
+        assert!(!is_nonce_error("execution reverted: PriceDiverged"));
+        assert!(!is_nonce_error("insufficient funds for gas"));
     }
 
     #[tokio::test]

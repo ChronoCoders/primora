@@ -14,6 +14,9 @@ ADDR0="0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
 SIGNER1_KEY="0x0000000000000000000000000000000000000000000000000000000000000001"
 SIGNER2_KEY="0x0000000000000000000000000000000000000000000000000000000000000002"
 NODE_KEY="0x0000000000000000000000000000000000000000000000000000000000000abc"
+# Backend OracleSubmitter account: Anvil account 1 (funded on the fork), DISTINCT
+# from KEY0 so on-chain TWAP submission has its own nonce space (no contention).
+SUBMITTER_KEY="0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
 ETH_RPC="http://localhost:8545"
 POLY_RPC="http://localhost:8546"
 SERVICE="http://localhost:3000"
@@ -127,10 +130,9 @@ PY
 write_frontend "$FRONTEND/lib/deployments/local.json"   31337 "$ETH_PRIM"  "$ETH_HOUSE"  "$ETH_ORACLE"  "$ETH_TREASURY"  "$ETH_NODEREG"  "$ETH_STAKING"  "$ETH_MINING"
 write_frontend "$FRONTEND/lib/deployments/polygon.json" 31338 "$POLY_PRIM" "$POLY_HOUSE" "$POLY_ORACLE" "$POLY_TREASURY" "$POLY_NODEREG" "$POLY_STAKING" "$POLY_MINING"
 
-echo "=== 5. Submit TWAP prices to BOTH OracleAggregators (all four commodities) ==="
-# Gold/Silver use the on-chain Chainlink MOCK feeds (fixed). Platinum/CrudeOil
-# read REAL prices from Pyth Hermes (off-chain HTTP; backend has internet), the
-# same source the verification-service samples for those commodities.
+echo "=== 5. Log live feed prices + authorize the backend submitter (no cast price writes) ==="
+# Platinum/CrudeOil read REAL prices from Pyth Hermes (off-chain HTTP; backend has
+# internet), the same source the verification-service samples for those commodities.
 PYTH_XPT_ID="398e4bbc7cbf89d6648c21e08019d878967677753b3096799595c78f805a34e5"
 PYTH_WTI_ID="05e7c9b556df67e455c52ea2d31658744e3f4ade60db7dab887008844f2ae472"
 hermes_8dec() {
@@ -159,16 +161,14 @@ XAU_8DEC=$(read_chainlink_8dec "$CHAINLINK_XAU")
 XAG_8DEC=$(read_chainlink_8dec "$CHAINLINK_XAG")
 echo "Chainlink live: XAU(8dec)=${XAU_8DEC:-UNAVAILABLE} (~\$$(( ${XAU_8DEC:-0} / 100000000 )))  XAG(8dec)=${XAG_8DEC:-UNAVAILABLE} (~\$$(( ${XAG_8DEC:-0} / 100000000 )))"
 
-submit_prices() {
-  local rpc="$1" oracle="$2"
-  [ -n "$XAU_8DEC" ] && cast send "$oracle" "submitPrice(uint8,uint256)" 0 "$XAU_8DEC" --private-key $KEY0 --rpc-url "$rpc" > /dev/null  # Gold (live Chainlink)
-  [ -n "$XAG_8DEC" ] && cast send "$oracle" "submitPrice(uint8,uint256)" 2 "$XAG_8DEC" --private-key $KEY0 --rpc-url "$rpc" > /dev/null  # Silver (live Chainlink)
-  [ -n "$XPT_8DEC" ] && cast send "$oracle" "submitPrice(uint8,uint256)" 1 "$XPT_8DEC" --private-key $KEY0 --rpc-url "$rpc" > /dev/null  # Platinum (live Hermes)
-  [ -n "$WTI_8DEC" ] && cast send "$oracle" "submitPrice(uint8,uint256)" 3 "$WTI_8DEC" --private-key $KEY0 --rpc-url "$rpc" > /dev/null  # CrudeOil (live Hermes)
-  return 0
-}
-submit_prices "$ETH_RPC"  "$ETH_ORACLE"  && echo "Ethereum oracle prices submitted"
-submit_prices "$POLY_RPC" "$POLY_ORACLE" && echo "Polygon oracle prices submitted"
+# Authorize the backend OracleSubmitter as the on-chain price writer. It runs from
+# a DISTINCT account (SUBMITTER_ADDR) so its nonce space never contends with the
+# demo's KEY0 cast sends. No cast submitPrice here -- the backend submitter writes
+# each commodity's TWAP to BOTH OracleAggregators at session end (the real path).
+SUBMITTER_ADDR="$(cast wallet address --private-key "$SUBMITTER_KEY")"
+cast send "$ETH_ORACLE"  "setSubmitter(address)" "$SUBMITTER_ADDR" --private-key $KEY0 --rpc-url "$ETH_RPC"  > /dev/null
+cast send "$POLY_ORACLE" "setSubmitter(address)" "$SUBMITTER_ADDR" --private-key $KEY0 --rpc-url "$POLY_RPC" > /dev/null
+echo "OracleAggregator submitter authorized: $SUBMITTER_ADDR (backend writes TWAP on-chain at session end)"
 
 # TEST-ONLY PRM funding: temporarily point the minter at the deployer to mint
 # stakeable PRM, then restore the MiningContract as minter (not production).
@@ -250,11 +250,11 @@ CHAINLINK_XAU_ADDRESS="$CHAINLINK_XAU" \
 CHAINLINK_XAG_ADDRESS="$CHAINLINK_XAG" \
 SIGNING_KEY_HEX="0000000000000000000000000000000000000000000000000000000000000001" \
 ETHEREUM_RPC_URL="$ETH_RPC" \
-ETHEREUM_ORACLE_SUBMITTER_KEY_HEX="${KEY0#0x}" \
+ETHEREUM_ORACLE_SUBMITTER_KEY_HEX="${SUBMITTER_KEY#0x}" \
 ETHEREUM_ORACLE_AGGREGATOR_ADDRESS="$ETH_ORACLE" \
 ETHEREUM_STAKING_ADDRESS="$ETH_STAKING" \
 POLYGON_RPC_URL="$POLY_RPC" \
-POLYGON_ORACLE_SUBMITTER_KEY_HEX="${KEY0#0x}" \
+POLYGON_ORACLE_SUBMITTER_KEY_HEX="${SUBMITTER_KEY#0x}" \
 POLYGON_ORACLE_AGGREGATOR_ADDRESS="$POLY_ORACLE" \
 POLYGON_STAKING_ADDRESS="$POLY_STAKING" \
 NODE_ENDPOINTS="node-1=http://localhost:50051,node-2=http://localhost:50052,node-3=http://localhost:50053,node-4=http://localhost:50054" \
@@ -328,6 +328,35 @@ if [ -n "$WTI_8DEC" ]; then
 else
   echo "  skipped: Pyth WTI feed unavailable (contract may be expired)"
 fi
+
+echo "=== 14e. Verify on-chain prices written by the BACKEND submitter (getPriceUnchecked) ==="
+# Each ended session triggers the backend OracleSubmitter to write that commodity's
+# TWAP to BOTH OracleAggregators (from SUBMITTER_ADDR, distinct nonce space). Read
+# them back to prove the prices landed on-chain via the real submitter path.
+verify_price() {
+  local label="$1" oracle="$2" rpc="$3" ordinal="$4"
+  local out price set_flag
+  out=$(cast call "$oracle" "getPriceUnchecked(uint8)(uint256,uint256,bool)" "$ordinal" --rpc-url "$rpc" 2>/dev/null)
+  price=$(echo "$out" | sed -n '1p' | awk '{print $1}')
+  set_flag=$(echo "$out" | sed -n '3p' | awk '{print $1}')
+  if [ "${set_flag:-false}" = "true" ] && [ -n "${price:-}" ] && [ "${price:-0}" != "0" ]; then
+    echo "  OK   $label ordinal=$ordinal price=$price set=$set_flag"
+  else
+    echo "  MISS $label ordinal=$ordinal price=${price:-?} set=${set_flag:-?}"
+  fi
+}
+echo "Ethereum OracleAggregator ($ETH_ORACLE):"
+verify_price "Gold     ETH" "$ETH_ORACLE" "$ETH_RPC" 0
+verify_price "Platinum ETH" "$ETH_ORACLE" "$ETH_RPC" 1
+verify_price "Silver   ETH" "$ETH_ORACLE" "$ETH_RPC" 2
+verify_price "CrudeOil ETH" "$ETH_ORACLE" "$ETH_RPC" 3
+echo "Polygon OracleAggregator ($POLY_ORACLE):"
+verify_price "Gold     POL" "$POLY_ORACLE" "$POLY_RPC" 0
+verify_price "Platinum POL" "$POLY_ORACLE" "$POLY_RPC" 1
+verify_price "Silver   POL" "$POLY_ORACLE" "$POLY_RPC" 2
+verify_price "CrudeOil POL" "$POLY_ORACLE" "$POLY_RPC" 3
+echo "submitter sends (tx hash / nonce) from backend log:"
+grep -i "submitted price to oracle aggregator\|nonce conflict" /tmp/demo_backend.log | tail -20 || echo "  (no submitter log lines)"
 
 echo "=== 15. Leave one ACTIVE session (Gold/Ethereum, server-derived hashrate, NOT ended) ==="
 ACOMMIT=$(python3 -c "import hashlib; print(hashlib.sha256(bytes.fromhex('99')).hexdigest())")
