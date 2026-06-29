@@ -7,17 +7,19 @@ use tokio::sync::mpsc::channel;
 async fn test_no_triggers_low() {
     let (tx, mut rx) = channel(16);
     let engine = AnomalyEngine::new(tx);
-    let level = engine.process(
+    let assessment = engine.process(
         SessionId("sess-clean".to_string()),
         Address::ZERO,
         vec![ValidationResult::Valid],
     );
-    assert_eq!(level, SuspicionLevel::Low);
+    assert_eq!(assessment.level, SuspicionLevel::Low);
+    assert_eq!(assessment.score_bps, 0);
 
     let Some(event) = rx.recv().await else {
         panic!("no anomaly event published");
     };
     assert_eq!(event.level, SuspicionLevel::Low);
+    assert_eq!(event.score, 0);
     assert!(event.triggers.is_empty());
 }
 
@@ -25,17 +27,19 @@ async fn test_no_triggers_low() {
 async fn test_single_trigger_medium() {
     let (tx, mut rx) = channel(16);
     let engine = AnomalyEngine::new(tx);
-    let level = engine.process(
+    let assessment = engine.process(
         SessionId("sess-single".to_string()),
         Address::ZERO,
         vec![ValidationResult::Invalid(InvalidReason::TimingAnomaly)],
     );
-    assert_eq!(level, SuspicionLevel::Medium);
+    assert_eq!(assessment.level, SuspicionLevel::Medium);
+    assert_eq!(assessment.score_bps, 2_500);
 
     let Some(event) = rx.recv().await else {
         panic!("no anomaly event published");
     };
     assert_eq!(event.level, SuspicionLevel::Medium);
+    assert_eq!(event.score, 2_500);
     assert_eq!(event.session_id, SessionId("sess-single".to_string()));
     assert_eq!(event.triggers, vec![InvalidReason::TimingAnomaly]);
 }
@@ -44,7 +48,7 @@ async fn test_single_trigger_medium() {
 async fn test_multiple_triggers_high() {
     let (tx, mut rx) = channel(16);
     let engine = AnomalyEngine::new(tx);
-    let level = engine.process(
+    let assessment = engine.process(
         SessionId("sess-multi".to_string()),
         Address::ZERO,
         vec![
@@ -52,12 +56,14 @@ async fn test_multiple_triggers_high() {
             ValidationResult::Invalid(InvalidReason::HashrateImpossible),
         ],
     );
-    assert_eq!(level, SuspicionLevel::High);
+    assert_eq!(assessment.level, SuspicionLevel::High);
+    assert_eq!(assessment.score_bps, 5_000);
 
     let Some(event) = rx.recv().await else {
         panic!("no anomaly event published");
     };
     assert_eq!(event.level, SuspicionLevel::High);
+    assert_eq!(event.score, 5_000);
     assert_eq!(event.triggers.len(), 2);
 }
 
@@ -65,7 +71,7 @@ async fn test_multiple_triggers_high() {
 async fn test_duplicate_triggers_deduplicated() {
     let (tx, mut rx) = channel(16);
     let engine = AnomalyEngine::new(tx);
-    let level = engine.process(
+    let assessment = engine.process(
         SessionId("sess-dup".to_string()),
         Address::ZERO,
         vec![
@@ -73,10 +79,12 @@ async fn test_duplicate_triggers_deduplicated() {
             ValidationResult::Invalid(InvalidReason::TimingAnomaly),
         ],
     );
-    assert_eq!(level, SuspicionLevel::Medium);
+    assert_eq!(assessment.level, SuspicionLevel::Medium);
+    assert_eq!(assessment.score_bps, 2_500);
 
     let Some(event) = rx.recv().await else {
         panic!("no anomaly event published");
     };
+    assert_eq!(event.score, 2_500);
     assert_eq!(event.triggers, vec![InvalidReason::TimingAnomaly]);
 }

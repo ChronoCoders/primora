@@ -32,7 +32,7 @@ async fn test_insert_and_query_anomaly_event() {
     let event = AnomalyEvent {
         session_id: unique_session_id(),
         wallet: Address::ZERO,
-        score: 0,
+        score: 2_500,
         triggers: vec![InvalidReason::TimingAnomaly],
         level: SuspicionLevel::Medium,
         timestamp: Utc::now(),

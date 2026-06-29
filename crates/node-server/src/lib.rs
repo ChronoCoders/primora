@@ -202,7 +202,6 @@ impl NodeService for NodeServiceImpl {
                 active_sessions_count: 1,
                 started_at: Utc::now(),
                 last_submission_at: None,
-                recent_proof_count: 0,
                 assigned_node_id: None,
                 commodity: Commodity::Gold,
                 // Attestation is verification-only and never mints; the target

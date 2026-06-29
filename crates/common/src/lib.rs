@@ -193,8 +193,6 @@ pub struct SessionContext {
     pub started_at: DateTime<Utc>,
     /// Timestamp of the last submission, if any.
     pub last_submission_at: Option<DateTime<Utc>>,
-    /// Count of recent proofs observed in this session.
-    pub recent_proof_count: u32,
     /// Node assigned to this session at creation. `None` until a node is assigned.
     pub assigned_node_id: Option<NodeId>,
     /// Commodity this session mines toward.
@@ -251,8 +249,8 @@ pub struct AnomalyEvent {
     pub session_id: SessionId,
     /// Miner wallet.
     pub wallet: Address,
-    /// Scaled integer score in basis points (0-10000). Reserved for Phase 2
-    /// weighted scoring; currently always 0.
+    /// Anomaly score in basis points (0-10000), linear in the count of distinct
+    /// anomaly signals (`anomaly_engine::anomaly_score_bps`). 0 means no signals.
     pub score: u32,
     /// Triggers that produced this event.
     pub triggers: Vec<InvalidReason>,

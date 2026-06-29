@@ -14,7 +14,6 @@ fn ctx(client_type: ClientType, active_sessions_count: u32, last: Option<chrono:
         active_sessions_count,
         started_at: Utc::now(),
         last_submission_at: last,
-        recent_proof_count: 5,
         assigned_node_id: None,
         commodity: Commodity::Gold,
         target_chain: Chain::Ethereum,

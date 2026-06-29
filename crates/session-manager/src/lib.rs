@@ -631,7 +631,6 @@ mod tests {
             active_sessions_count: 0,
             started_at: Utc::now(),
             last_submission_at: None,
-            recent_proof_count: 0,
             assigned_node_id: None,
             commodity: common::Commodity::Gold,
             target_chain: Chain::Polygon,

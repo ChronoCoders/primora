@@ -366,7 +366,7 @@ mod tests {
         AnomalyEvent {
             session_id: SessionId("sess-anomaly".to_string()),
             wallet: Address::ZERO,
-            score: 0,
+            score: 2_500,
             triggers: vec![InvalidReason::TimingAnomaly],
             level: SuspicionLevel::Medium,
             timestamp: epoch(),

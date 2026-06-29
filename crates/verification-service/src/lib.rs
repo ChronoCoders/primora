@@ -329,7 +329,6 @@ async fn create_session(
         active_sessions_count,
         started_at: Utc::now(),
         last_submission_at: None,
-        recent_proof_count: 0,
         assigned_node_id,
         commodity,
         target_chain,
@@ -448,15 +447,16 @@ async fn submit_proof(
         ValidationResult::Invalid(reason) => vec![reason.clone()],
         ValidationResult::Valid | ValidationResult::Suspicious(_) => Vec::new(),
     };
-    let level = state
+    let assessment = state
         .anomaly_engine
         .process(session_id.clone(), ctx.wallet, vec![result]);
+    let level = assessment.level;
 
     if level != SuspicionLevel::Low {
         let event = AnomalyEvent {
             session_id: session_id.clone(),
             wallet: ctx.wallet,
-            score: 0,
+            score: assessment.score_bps,
             triggers: triggers.clone(),
             level,
             timestamp: Utc::now(),
