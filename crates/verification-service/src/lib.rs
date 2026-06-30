@@ -65,6 +65,10 @@ pub struct AppState {
     /// Per-chain staking readers for the combined cross-chain boost (Decision
     /// 4d). An empty vec means no staking boost is applied (boost defaults to 0).
     pub staking_readers: Vec<(common::Chain, Arc<onchain_client::StakingReader>)>,
+    /// Reader for the canonical-chain HouseEdge contract's live edge
+    /// (`currentEdgeBps`). `None` when unconfigured, in which case net-USD math
+    /// falls back to the static `payout_calculator` default edge.
+    pub house_edge_reader: Option<Arc<onchain_client::HouseEdgeReader>>,
     /// TWAP calculators keyed by session id, guarded for concurrent access.
     pub twap_sessions: Arc<RwLock<HashMap<String, TwapCalculator>>>,
     /// Node id -> site metadata, from the `NODE_SITES` config. Empty when unset;
@@ -621,6 +625,26 @@ async fn staking_summary(state: &AppState, wallet: Address) -> StakingSummary {
     build_summary(ethereum_result, polygon_result)
 }
 
+/// Returns the payout config with its house edge set to the live on-chain edge
+/// (`HouseEdge.currentEdgeBps`) when a reader is configured, so net-USD figures
+/// track the dynamic edge the contract actually enforces (Spec 2.5). Falls back
+/// to the static `payout_calculator` default edge when no reader is configured
+/// or the read fails (logged), never blocking the payout path.
+async fn payout_config_with_live_edge(state: &AppState) -> payout_calculator::PayoutConfig {
+    let mut config = payout_calculator::default_config();
+    if let Some(reader) = &state.house_edge_reader {
+        match reader.current_edge_bps().await {
+            Ok(edge_bps) => config.house_edge_bps = edge_bps,
+            Err(e) => tracing::warn!(
+                error = %e,
+                default_edge_bps = %config.house_edge_bps,
+                "live house edge read failed, using default edge"
+            ),
+        }
+    }
+    config
+}
+
 /// Ends a session: verifies the commit-reveal nonce, finalizes the session TWAP,
 /// derives the on-chain seed, coordinates 2-of-3 node attestation, signs the
 /// resulting mint proposal with the backend key, and persists it.
@@ -730,7 +754,7 @@ async fn end_session(
         Ok(attestation_result) => {
             let duration_secs =
                 (twap.session_end - twap.session_start).num_seconds().max(0) as u64;
-            let payout_config = payout_calculator::default_config();
+            let payout_config = payout_config_with_live_edge(&state).await;
             // The average is over the bounded client-claimed hashrates: the
             // TODO(phase3-verified-hashrate): rate is server-derived from
             // Σ difficulty / elapsed and clamped to the per-client max; phase 3
@@ -976,7 +1000,7 @@ async fn wallet_sessions(
     let mut rows = state.session_manager.list_sessions_for_wallet(&key).await?;
     if !rows.is_empty() {
         let boost_bps = staking_summary(&state, address).await.effective_boost_bps;
-        let payout_config = payout_calculator::default_config();
+        let payout_config = payout_config_with_live_edge(&state).await;
         let now = Utc::now();
         let twap_map = state.twap_sessions.read().await;
         for row in &mut rows {

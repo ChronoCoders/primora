@@ -158,8 +158,11 @@ pub fn calculate_redemption_usd(
 }
 
 /// Applies the house edge to a 6-decimal USDC amount (Spec Section 4.6, Step 3).
+/// `house_edge_bps` may be the live on-chain edge (`HouseEdge.currentEdgeBps`,
+/// dynamic up to `MAX_EDGE_BPS` 2_500), not just the static default. An edge at
+/// or above [`BPS_DENOMINATOR`] saturates the net to 0 rather than underflowing.
 pub fn apply_house_edge(redemption_usd_scaled: u128, house_edge_bps: u128) -> u128 {
-    redemption_usd_scaled * (BPS_DENOMINATOR - house_edge_bps) / BPS_DENOMINATOR
+    redemption_usd_scaled * BPS_DENOMINATOR.saturating_sub(house_edge_bps) / BPS_DENOMINATOR
 }
 
 /// Applies a staking boost to gross PRM. `boost_bps` is 0 for no boost, up to
@@ -320,6 +323,22 @@ mod tests {
     #[test]
     fn test_house_edge_17pct() {
         assert_eq!(apply_house_edge(1_000_000, 1_700), 830_000);
+    }
+
+    #[test]
+    fn test_house_edge_dynamic_22pct() {
+        assert_eq!(apply_house_edge(1_000_000, 2_200), 780_000);
+    }
+
+    #[test]
+    fn test_house_edge_dynamic_24pct() {
+        assert_eq!(apply_house_edge(1_000_000, 2_400), 760_000);
+    }
+
+    #[test]
+    fn test_house_edge_saturates_out_of_range() {
+        assert_eq!(apply_house_edge(1_000_000, 10_000), 0);
+        assert_eq!(apply_house_edge(1_000_000, 12_000), 0);
     }
 
     #[test]

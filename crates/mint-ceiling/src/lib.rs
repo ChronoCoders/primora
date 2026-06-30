@@ -60,6 +60,15 @@ impl MintCeilingCalculator {
     /// layer from `MiningContract.mintCeilingPerBlock` (deployed `1_000_000e18`),
     /// which bounds a single block; the two guards are independent and do not
     /// share a value.
+    ///
+    /// Verified consistent (no conflict scenario): a single session's mint is far
+    /// below the per-block cap (reaching `1_000_000` PRM in one mint needs an
+    /// unrealistic multi-day session), so a backend-approved proposal does not
+    /// revert on the per-block ceiling under normal load. The backend daily cap is
+    /// the binding production limit; the on-chain per-block ceiling is a coarse
+    /// anti-spam backstop. The only way to hit the per-block cap (many large mints
+    /// in one block) is itself a retriable revert that would also exhaust this
+    /// daily cap, so the layers never deadlock or mis-settle.
     pub fn daily_ceiling(&self, active_users: u64, avg_daily_prm_per_user: u64) -> u64 {
         active_users
             .saturating_mul(avg_daily_prm_per_user)

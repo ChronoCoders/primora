@@ -12,7 +12,7 @@ use anomaly_engine::AnomalyEngine;
 use common::{AnomalyEvent, Chain, NodeId, NodeSite};
 use mint_ceiling::MintCeilingCalculator;
 use node_coordinator::{GrpcNodeClient, NodeCoordinator, ATTESTATION_NODE_COUNT};
-use onchain_client::{OnchainClient, OracleSubmitter, StakingReader};
+use onchain_client::{HouseEdgeReader, OnchainClient, OracleSubmitter, StakingReader};
 use postgres_store::PostgresStore;
 use rate_limiter::RateLimiter;
 use session_manager::SessionStore;
@@ -25,6 +25,7 @@ const DEFAULT_LOG_LEVEL: &str = "info";
 const DEFAULT_MINT_CEILING_ACTIVE_USERS: &str = "1000";
 const DEFAULT_MINT_CEILING_AVG_DAILY_PRM_PER_USER: &str = "500";
 const ANOMALY_CHANNEL_CAPACITY: usize = 1024;
+const HOUSE_EDGE_CACHE_TTL_SECS: u64 = 60;
 
 /// Service configuration assembled from environment variables.
 struct Config {
@@ -226,6 +227,33 @@ async fn build_staking_readers() -> Vec<(Chain, Arc<StakingReader>)> {
     readers
 }
 
+/// Builds the canonical-chain [`HouseEdgeReader`] used to read the live edge for
+/// net-USD math. Configured by `HOUSE_EDGE_ADDRESS` read over the canonical
+/// `RPC_URL` (the same endpoint as the canonical oracle read, Decision #16). When
+/// the address is unset, net-USD math falls back to the static default edge; an
+/// invalid address or init failure is logged and also falls back (non-fatal).
+async fn build_house_edge_reader(rpc_url: &str) -> Option<Arc<HouseEdgeReader>> {
+    let addr = std::env::var("HOUSE_EDGE_ADDRESS").ok()?;
+    let address = match Address::from_str(&addr) {
+        Ok(address) => address,
+        Err(e) => {
+            tracing::warn!(error = %e, "invalid HOUSE_EDGE_ADDRESS, net-USD uses the default edge");
+            return None;
+        }
+    };
+    let ttl = std::time::Duration::from_secs(HOUSE_EDGE_CACHE_TTL_SECS);
+    match HouseEdgeReader::new(rpc_url, address, ttl).await {
+        Ok(reader) => {
+            tracing::info!(%address, ttl_secs = HOUSE_EDGE_CACHE_TTL_SECS, "live house edge reader configured");
+            Some(Arc::new(reader))
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "house edge reader init failed, net-USD uses the default edge");
+            None
+        }
+    }
+}
+
 /// Loads and validates all configuration from the environment.
 fn load_config() -> Result<Config, String> {
     let database_url = require("DATABASE_URL")?;
@@ -348,6 +376,7 @@ async fn main() {
 
     let oracle_submitters = build_oracle_submitters().await;
     let staking_readers = build_staking_readers().await;
+    let house_edge_reader = build_house_edge_reader(&config.rpc_url).await;
 
     let mut node_ids: Vec<NodeId> = Vec::new();
     let mut node_clients: HashMap<NodeId, Arc<GrpcNodeClient>> = HashMap::new();
@@ -419,6 +448,7 @@ async fn main() {
         oracle_reader: Arc::new(oracle_reader),
         oracle_submitters,
         staking_readers,
+        house_edge_reader,
         twap_sessions: Arc::new(RwLock::new(HashMap::new())),
         node_sites: Arc::new(parse_node_sites(&optional("NODE_SITES", ""))),
         mint_ceiling_active_users: config.mint_ceiling_active_users,

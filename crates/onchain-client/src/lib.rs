@@ -3,6 +3,7 @@
 //! Read-only on-chain access and backend mint proposal signing.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use alloy::network::EthereumWallet;
 use alloy::primitives::{Address, Bytes, B256, TxHash, U256};
@@ -59,6 +60,20 @@ mod staking_abi {
 }
 
 use staking_abi::IStakingContract;
+
+#[allow(missing_docs, dead_code, non_snake_case, clippy::all)]
+mod house_edge_abi {
+    use alloy::sol;
+
+    sol! {
+        #[sol(rpc)]
+        interface IHouseEdge {
+            function currentEdgeBps() external view returns (uint256 edgeBps);
+        }
+    }
+}
+
+use house_edge_abi::IHouseEdge;
 
 /// Errors returned by the on-chain client.
 #[derive(Debug)]
@@ -332,6 +347,12 @@ impl MiningWriter {
     }
 
     /// Proposes a mint settling `session_id` to `recipient` for `amount`.
+    ///
+    /// The contract stores and later mints exactly this `amount`
+    /// (`MiningContract.executeMint` mints `proposal.amount` as-is); it never
+    /// re-derives or re-applies a staking boost, and references no
+    /// `StakingContract`. The backend's combined cross-chain boost (Decision 4d)
+    /// is therefore the sole boost application — no double-application risk.
     pub async fn propose_mint(
         &self,
         proposal_id: [u8; 32],
@@ -485,6 +506,79 @@ impl StakingReader {
     }
 }
 
+/// A cached edge reading with the instant it was fetched.
+struct CachedEdge {
+    edge_bps: u128,
+    fetched_at: Instant,
+}
+
+/// Read-only client for a chain's HouseEdge contract, exposing the live edge
+/// (`currentEdgeBps`) with a short in-memory cache. The on-chain edge is dynamic
+/// (Spec 2.5: it rises automatically under reserve pressure), so net-USD math
+/// must read it rather than assume the static default. Reads are cached for
+/// [`HouseEdgeReader`]'s TTL to bound RPC load; the staleness window is the TTL.
+pub struct HouseEdgeReader {
+    provider: DynProvider,
+    house_edge_address: Address,
+    ttl: Duration,
+    cache: tokio::sync::RwLock<Option<CachedEdge>>,
+}
+
+impl HouseEdgeReader {
+    /// Builds a read-only HTTP client bound to the HouseEdge contract at
+    /// `house_edge_address`. `ttl` is the cache staleness window: a cached edge
+    /// older than `ttl` is refetched on the next read.
+    pub async fn new(
+        rpc_url: &str,
+        house_edge_address: Address,
+        ttl: Duration,
+    ) -> Result<Self, OnchainClientError> {
+        let url = rpc_url
+            .parse()
+            .map_err(|_| OnchainClientError::InvalidUrl(rpc_url.to_string()))?;
+        let provider = ProviderBuilder::new().connect_http(url).erased();
+        Ok(Self {
+            provider,
+            house_edge_address,
+            ttl,
+            cache: tokio::sync::RwLock::new(None),
+        })
+    }
+
+    /// Reads `currentEdgeBps` fresh from the chain (no cache).
+    async fn read_edge(&self) -> Result<u128, OnchainClientError> {
+        let contract = IHouseEdge::new(self.house_edge_address, &self.provider);
+        let edge_bps = contract
+            .currentEdgeBps()
+            .call()
+            .await
+            .map_err(|e| OnchainClientError::Contract(e.to_string()))?;
+        u128::try_from(edge_bps)
+            .map_err(|_| OnchainClientError::Contract("edge bps overflows u128".into()))
+    }
+
+    /// Returns the live edge in basis points, serving the cached value when it is
+    /// within the TTL and otherwise refetching from chain. The caller decides how
+    /// to handle an error (the service falls back to the static default).
+    pub async fn current_edge_bps(&self) -> Result<u128, OnchainClientError> {
+        {
+            let guard = self.cache.read().await;
+            if let Some(cached) = guard.as_ref() {
+                if cached.fetched_at.elapsed() < self.ttl {
+                    return Ok(cached.edge_bps);
+                }
+            }
+        }
+        let edge_bps = self.read_edge().await?;
+        let mut guard = self.cache.write().await;
+        *guard = Some(CachedEdge {
+            edge_bps,
+            fetched_at: Instant::now(),
+        });
+        Ok(edge_bps)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     // Run with: cargo test -p onchain-client -- --ignored
@@ -562,6 +656,22 @@ mod tests {
         assert!(is_nonce_error("replacement transaction underpriced"));
         assert!(!is_nonce_error("execution reverted: PriceDiverged"));
         assert!(!is_nonce_error("insufficient funds for gas"));
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_house_edge_reader_live() {
+        let house_edge: Address = "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+            .parse()
+            .unwrap();
+        let reader =
+            HouseEdgeReader::new("http://localhost:8545", house_edge, Duration::from_secs(60))
+                .await
+                .unwrap();
+        let edge = reader.current_edge_bps().await.unwrap();
+        assert!((1_000..=2_500).contains(&edge));
+        let cached = reader.current_edge_bps().await.unwrap();
+        assert_eq!(edge, cached);
     }
 
     #[tokio::test]
