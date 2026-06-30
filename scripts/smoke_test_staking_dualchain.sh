@@ -17,7 +17,10 @@ ADDR0="0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
 ETH_RPC="http://localhost:8545"
 POLY_RPC="http://localhost:8546"
 SERVICE="http://localhost:3000"
-NODE_KEY="0x0000000000000000000000000000000000000000000000000000000000000abc"
+NODE1_KEY="0x00000000000000000000000000000000000000000000000000000000000000a1"
+NODE2_KEY="0x00000000000000000000000000000000000000000000000000000000000000a2"
+NODE3_KEY="0x00000000000000000000000000000000000000000000000000000000000000a3"
+NODE4_KEY="0x00000000000000000000000000000000000000000000000000000000000000a4"
 
 # 30,000 PRM in wei (30000 * 1e18).
 STAKE_WEI="30000000000000000000000"
@@ -49,7 +52,7 @@ echo "=== 1. Infra: Postgres + Redis (Redis on ${REDIS_HOST_PORT}) ==="
 docker compose -f docker-compose.yml -f "$OVERRIDE" up -d postgres redis
 sleep 5
 
-echo "=== 2. Two Anvil: :8545 (chain 1, Ethereum mainnet FORK), :8546 (chain 137, Polygon) ==="
+echo "=== 2. Two Anvil: :8545 (chain 31337, Ethereum mainnet FORK), :8546 (chain 31338, Polygon) ==="
 pkill -f anvil 2>/dev/null || true
 sleep 1
 # Real Ethereum-mainnet Chainlink XAU feed; present on the fork.
@@ -59,8 +62,8 @@ if [ -z "$FORK_RPC" ] && [ -f .env ]; then
   FORK_RPC="$(grep -E '^RPC_URL=' .env | head -1 | cut -d= -f2- | tr -d '[:space:]')" || true
 fi
 [ -n "$FORK_RPC" ] || { echo "ERROR: no mainnet fork RPC. Set ETH_FORK_RPC or RPC_URL in .env" >&2; exit 1; }
-anvil --fork-url "$FORK_RPC" --chain-id 1 --port 8545 > /tmp/anvil_eth.log  2>&1 &
-anvil --chain-id 137 --port 8546 > /tmp/anvil_poly.log 2>&1 &
+anvil --fork-url "$FORK_RPC" --chain-id 31337 --port 8545 > /tmp/anvil_eth.log  2>&1 &
+anvil --chain-id 31338 --port 8546 > /tmp/anvil_poly.log 2>&1 &
 for _ in $(seq 1 60); do
   cast block-number --rpc-url $ETH_RPC >/dev/null 2>&1 && cast chain-id --rpc-url $POLY_RPC >/dev/null 2>&1 && break
   sleep 1
@@ -125,21 +128,26 @@ PROOF_HASH=$(echo "$GEN" | sed -n '2p')
 echo "proof_input=$PROOF_INPUT"
 echo "proof_hash=$PROOF_HASH"
 
-echo "=== 7. Start node-server (real attestation) ==="
-BIND_ADDR="127.0.0.1:50051" \
-NODE_API_KEY="devkey" \
-NODE_SIGNING_KEY_HEX="${NODE_KEY#0x}" \
-NODE_ID="node-b" \
-LOG_LEVEL="info" \
-./target/debug/primora-node > /tmp/node_staking.log 2>&1 &
-NODE_PID=$!
-echo "waiting for node RandomX VM init..."
-for i in $(seq 1 60); do
-  if grep -q "primora node starting" /tmp/node_staking.log 2>/dev/null; then echo "node ready"; break; fi
-  if ! kill -0 $NODE_PID 2>/dev/null; then echo "NODE DIED:"; cat /tmp/node_staking.log; exit 1; fi
-  sleep 1
-done
-sleep 1
+echo "=== 7. Start 4 node-servers (genuine 3-of-4 attestation) ==="
+NODE1_ADDR=$(cast wallet address --private-key "$NODE1_KEY")
+NODE2_ADDR=$(cast wallet address --private-key "$NODE2_KEY")
+NODE3_ADDR=$(cast wallet address --private-key "$NODE3_KEY")
+NODE4_ADDR=$(cast wallet address --private-key "$NODE4_KEY")
+start_node() {
+  local id="$1" port="$2" key="$3"
+  BIND_ADDR="127.0.0.1:$port" NODE_API_KEY="devkey" NODE_SIGNING_KEY_HEX="${key#0x}" NODE_ID="$id" LOG_LEVEL="info" \
+    nohup ./target/debug/primora-node > "/tmp/node_staking_${id}.log" 2>&1 &
+  for _ in $(seq 1 60); do
+    grep -q "primora node starting" "/tmp/node_staking_${id}.log" 2>/dev/null && { echo "  $id ready on :$port"; return 0; }
+    sleep 1
+  done
+  echo "  $id FAILED to start on :$port" >&2; cat "/tmp/node_staking_${id}.log"; exit 1
+}
+start_node "node-1" 50051 "$NODE1_KEY"
+start_node "node-2" 50052 "$NODE2_KEY"
+start_node "node-3" 50053 "$NODE3_KEY"
+start_node "node-4" 50054 "$NODE4_KEY"
+echo "node signers: node-1=$NODE1_ADDR node-2=$NODE2_ADDR node-3=$NODE3_ADDR node-4=$NODE4_ADDR"
 
 echo "=== 8. Start verification-service wired to BOTH chains' staking contracts ==="
 # The per-chain {PREFIX}_RPC_URL is shared by the 4b oracle submitter and the 4d
@@ -151,7 +159,7 @@ echo "=== 8. Start verification-service wired to BOTH chains' staking contracts 
 DATABASE_URL="postgres://primora:primora_dev@localhost:5432/primora" \
 REDIS_URL="redis://localhost:${REDIS_HOST_PORT}" \
 BIND_ADDR="0.0.0.0:3000" \
-CHAIN_ID="1" \
+CHAIN_ID="31337" \
 RPC_URL="$ETH_RPC" \
 CHAINLINK_XAU_ADDRESS="$CHAINLINK_XAU" \
 SIGNING_KEY_HEX="0000000000000000000000000000000000000000000000000000000000000001" \
@@ -163,7 +171,8 @@ POLYGON_RPC_URL="$POLY_RPC" \
 POLYGON_ORACLE_SUBMITTER_KEY_HEX="${KEY0#0x}" \
 POLYGON_ORACLE_AGGREGATOR_ADDRESS="$POLY_ORACLE" \
 POLYGON_STAKING_ADDRESS="$POLY_STAKING" \
-NODE_ENDPOINTS="http://localhost:50051" \
+NODE_ENDPOINTS="node-1=http://localhost:50051,node-2=http://localhost:50052,node-3=http://localhost:50053,node-4=http://localhost:50054" \
+NODE_SIGNERS="node-1=$NODE1_ADDR,node-2=$NODE2_ADDR,node-3=$NODE3_ADDR,node-4=$NODE4_ADDR" \
 NODE_API_KEY="devkey" \
 LOG_LEVEL="info" \
 ./target/debug/primora-verification > /tmp/backend_staking.log 2>&1 &
@@ -178,17 +187,19 @@ echo "=== 9. Create session (chain ethereum, assigned node distinct from endpoin
 NONCE="00"
 COMMIT=$(python3 -c "import hashlib; print(hashlib.sha256(bytes.fromhex('$NONCE')).hexdigest())")
 SESS=$(curl -s -X POST $SERVICE/sessions -H "Content-Type: application/json" \
-  -d "{\"wallet\":\"$ADDR0\",\"client_type\":\"desktop\",\"commodity\":\"Gold\",\"chain\":\"ethereum\",\"assigned_node_id\":\"node-a\",\"commit_hash\":\"$COMMIT\"}")
+  -d "{\"wallet\":\"$ADDR0\",\"client_type\":\"desktop\",\"commodity\":\"Gold\",\"chain\":\"ethereum\",\"assigned_node_id\":\"node-1\",\"commit_hash\":\"$COMMIT\"}")
 echo "$SESS"
 SID=$(echo "$SESS" | python3 -c "import json,sys; print(json.load(sys.stdin)['session_id'])")
 
-echo "=== 10. Submit the VALID proof ==="
+echo "=== 10. Submit proofs: seq1 diff=1 (attested), seq2 high diff so server-derived hashrate is non-zero ==="
 curl -s -X POST $SERVICE/sessions/$SID/proofs -H "Content-Type: application/json" \
-  -d "{\"sequence\":1,\"hashrate\":2500,\"proof_hash\":\"$PROOF_HASH\",\"proof_input\":\"$PROOF_INPUT\",\"difficulty\":1}"
-echo " <- proof submitted"
-
-# Accrue a non-zero duration so gross_prm is positive.
-sleep 3
+  -d "{\"sequence\":1,\"proof_hash\":\"$PROOF_HASH\",\"proof_input\":\"$PROOF_INPUT\",\"difficulty\":1}"
+echo " <- proof 1 submitted"
+sleep 5
+curl -s -X POST $SERVICE/sessions/$SID/proofs -H "Content-Type: application/json" \
+  -d "{\"sequence\":2,\"proof_hash\":\"$PROOF_HASH\",\"proof_input\":\"$PROOF_INPUT\",\"difficulty\":19000}"
+echo " <- proof 2 submitted"
+sleep 1
 
 echo "=== 11. End session -- REAL attestation must pass ==="
 END=$(curl -s --max-time 90 -X POST $SERVICE/sessions/$SID/end -H "Content-Type: application/json" -d "{\"nonce\":\"$NONCE\"}")
@@ -208,7 +219,7 @@ echo "=== 14. VERIFY: combined boost = 1300 bps, boosted gross minted ==="
 if ! echo "$END" | grep -q "completed"; then
   echo "FAIL: end_session did not complete -- response: $END"
   echo "--- backend tail ---"; tail -30 /tmp/backend_staking.log
-  echo "--- node tail ---"; tail -20 /tmp/node_staking.log
+  echo "--- node-1 tail ---"; tail -20 /tmp/node_staking_node-1.log
   exit 1
 fi
 

@@ -85,7 +85,7 @@ COMMIT=$(python3 -c "import hashlib; print(hashlib.sha256(bytes.fromhex('$NONCE'
 echo "=== 7. Create a session ==="
 SESSION_RESP=$(curl -s -X POST $SERVICE/sessions \
   -H "Content-Type: application/json" \
-  -d "{\"wallet\":\"0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266\",\"client_type\":\"Desktop\",\"commodity\":\"Gold\",\"assigned_node_id\":\"node-jhb-001\",\"commit_hash\":\"$COMMIT\"}")
+  -d "{\"wallet\":\"0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266\",\"client_type\":\"Desktop\",\"commodity\":\"Gold\",\"chain\":\"ethereum\",\"assigned_node_id\":\"node-jhb-001\",\"commit_hash\":\"$COMMIT\"}")
 echo "$SESSION_RESP"
 SESSION_ID=$(echo "$SESSION_RESP" | python3 -c "import json,sys; print(json.load(sys.stdin)['session_id'])")
 echo "Session: $SESSION_ID"

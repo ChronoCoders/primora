@@ -52,7 +52,7 @@ pub struct AppState {
     pub onchain_client: Arc<onchain_client::OnchainClient>,
     /// Postgres store for anomaly events and mint proposals.
     pub postgres_store: Arc<postgres_store::PostgresStore>,
-    /// Node coordinator for 2-of-3 attestation.
+    /// Node coordinator for 3-of-4 attestation.
     pub node_coordinator: Arc<node_coordinator::NodeCoordinator<node_coordinator::GrpcNodeClient>>,
     /// Backend signing key for mint proposals.
     pub signing_key: Arc<alloy::signers::local::PrivateKeySigner>,
@@ -646,12 +646,13 @@ async fn payout_config_with_live_edge(state: &AppState) -> payout_calculator::Pa
 }
 
 /// Ends a session: verifies the commit-reveal nonce, finalizes the session TWAP,
-/// derives the on-chain seed, coordinates 2-of-3 node attestation, signs the
+/// derives the on-chain seed, coordinates 3-of-4 node attestation, signs the
 /// resulting mint proposal with the backend key, and persists it.
 ///
 /// The assigned node, proof set, gross PRM, and backing commodity are taken from
-/// real session state. The assigned-node signature remains a placeholder until
-/// the node binary exists; see the inline TODO.
+/// real session state. The assigned node is one of the four attesters and returns
+/// a genuine signature; quorum requires 3 distinct registered signers, each
+/// recovered by ecrecover over the proof hash and matched against `NODE_SIGNERS`.
 ///
 /// Returns `status: "rejected"` (400) on a nonce mismatch, `status:
 /// "no_assigned_node"` (400) when the session has no assigned node, `status:
@@ -742,9 +743,6 @@ async fn end_session(
         }
     };
 
-    // TODO(phase3-attestation-identity): the coordinator counts genuine returned
-    // signatures but does not yet ecrecover each signer and check it against a
-    // registered distinct node identity; that lands with attestation fix #4.
     let attestation = state
         .node_coordinator
         .coordinate_attestation(session_id.clone(), proof_set, seed, &assigned_node_id)
