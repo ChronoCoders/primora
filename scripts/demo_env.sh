@@ -276,17 +276,28 @@ export POLYGON_RPC_URL="$POLY_RPC" POLYGON_MINING_CONTRACT_ADDRESS="$POLY_MINING
 export DATABASE_URL="postgres://primora:primora_dev@localhost:5432/primora"
 ADMIN="./target/debug/primora-admin"
 
-# Fund the integer-key signer addresses for gas on both chains.
+# Fund every gas-paying account on both chains via the anvil cheat. On the
+# Ethereum mainnet fork the integer-key signer addresses (vm.addr(1)/vm.addr(2))
+# are EIP-7702 code-delegated on real mainnet, so `cast send --value` to them is
+# swept by the delegate and leaves a 0 balance -- the signers then cannot pay gas
+# for approveMint. anvil_setBalance sets the balance directly and is
+# delegation-proof on the fork and the plain Polygon chain alike.
 S1=$(cast wallet address --private-key $SIGNER1_KEY); S2=$(cast wallet address --private-key $SIGNER2_KEY)
+FUND_WEI="0x56BC75E2D63100000"  # 100 ether
 for RPC in $ETH_RPC $POLY_RPC; do
-  cast send $S1 --value 1ether --private-key $KEY0 --rpc-url $RPC > /dev/null
-  cast send $S2 --value 1ether --private-key $KEY0 --rpc-url $RPC > /dev/null
+  for ACCT in "$ADDR0" "$S1" "$S2" "$SUBMITTER_ADDR"; do
+    cast rpc anvil_setBalance "$ACCT" "$FUND_WEI" --rpc-url "$RPC" > /dev/null
+  done
 done
 
-# Run a full session to completion and mint it on its chain.
+# Run a full session to completion and mint it on its chain. Returns 0 ONLY when
+# the mint is verified on-chain (recipient PRM balanceOf increased by the minted
+# amount). Prints a loud failure and returns 1 if the session does not complete,
+# a multi-sig approval fails, or the mint does not actually land on-chain -- never
+# an unconditional "minted" echo.
 run_and_mint() {
-  local commodity="$1" chain_name="$2" rpc="$3" mining="$4" nonce="$5"
-  local commit sess sid pid
+  local commodity="$1" chain_name="$2" rpc="$3" mining="$4" prim="$5" nonce="$6"
+  local commit sess sid pid bal_before bal_after
   commit=$(python3 -c "import hashlib; print(hashlib.sha256(bytes.fromhex('$nonce')).hexdigest())")
   sess=$(curl -s -X POST $SERVICE/sessions -H "Content-Type: application/json" \
     -d "{\"wallet\":\"$ADDR0\",\"client_type\":\"desktop\",\"commodity\":\"$commodity\",\"chain\":\"$chain_name\",\"assigned_node_id\":\"node-1\",\"commit_hash\":\"$commit\",\"cpu_threads\":$CPU_THREADS}")
@@ -299,36 +310,53 @@ run_and_mint() {
   local end
   end=$(curl -s --max-time 90 -X POST $SERVICE/sessions/$sid/end -H "Content-Type: application/json" -d "{\"nonce\":\"$nonce\"}")
   if ! echo "$end" | grep -q "completed"; then
-    echo "  session $commodity/$chain_name did NOT complete: $end"
+    echo "  MINT FAILED: $commodity/$chain_name session did NOT complete: $end"
     return 1
   fi
   pid=$(cast keccak "$sid")
+  bal_before=$(cast call "$prim" "balanceOf(address)(uint256)" "$ADDR0" --rpc-url "$rpc" | awk '{print $1}')
   $ADMIN propose --session-id "$sid" > /dev/null 2>&1
   $ADMIN approve --proposal-id $pid --chain $chain_name > /dev/null 2>&1
-  cast send $mining "approveMint(bytes32)" $pid --private-key $SIGNER1_KEY --rpc-url $rpc > /dev/null
-  cast send $mining "approveMint(bytes32)" $pid --private-key $SIGNER2_KEY --rpc-url $rpc > /dev/null
+  cast send $mining "approveMint(bytes32)" $pid --private-key $SIGNER1_KEY --rpc-url $rpc > /dev/null 2>&1 \
+    || echo "  warn: signer1 approveMint failed for $commodity/$chain_name"
+  cast send $mining "approveMint(bytes32)" $pid --private-key $SIGNER2_KEY --rpc-url $rpc > /dev/null 2>&1 \
+    || echo "  warn: signer2 approveMint failed for $commodity/$chain_name"
   cast rpc evm_increaseTime 172801 --rpc-url $rpc > /dev/null
   cast rpc evm_mine --rpc-url $rpc > /dev/null
   $ADMIN execute --proposal-id $pid --chain $chain_name --session-id "$sid" > /dev/null 2>&1
-  echo "  minted: $commodity on $chain_name (session $sid)"
+  bal_after=$(cast call "$prim" "balanceOf(address)(uint256)" "$ADDR0" --rpc-url "$rpc" | awk '{print $1}')
+  if python3 -c "import sys; sys.exit(0 if int('${bal_after:-0}') > int('${bal_before:-0}') else 1)"; then
+    local minted
+    minted=$(python3 -c "print((int('${bal_after:-0}') - int('${bal_before:-0}')) / 10**18)")
+    echo "  minted: $commodity on $chain_name (+$minted PRM, balanceOf verified, session $sid)"
+    return 0
+  fi
+  echo "  MINT FAILED: $commodity on $chain_name -- balanceOf did NOT increase (before=$bal_before after=$bal_after, session $sid)"
+  return 1
 }
 
+MINTS_OK=0; MINTS_TRIED=0
 echo "=== 13. Run + mint Session A: Gold on Ethereum ==="
-run_and_mint "Gold"   "ethereum" "$ETH_RPC"  "$ETH_MINING"  "01" || true
+MINTS_TRIED=$((MINTS_TRIED + 1))
+run_and_mint "Gold"   "ethereum" "$ETH_RPC"  "$ETH_MINING"  "$ETH_PRIM"  "01" && MINTS_OK=$((MINTS_OK + 1))
 echo "=== 14. Run + mint Session B: Silver on Polygon ==="
-run_and_mint "Silver" "polygon"  "$POLY_RPC" "$POLY_MINING" "02" || true
+MINTS_TRIED=$((MINTS_TRIED + 1))
+run_and_mint "Silver" "polygon"  "$POLY_RPC" "$POLY_MINING" "$POLY_PRIM" "02" && MINTS_OK=$((MINTS_OK + 1))
 echo "=== 14c. Run + mint Session C: Platinum on Ethereum (live Pyth XPT) ==="
 if [ -n "$XPT_8DEC" ]; then
-  run_and_mint "Platinum" "ethereum" "$ETH_RPC" "$ETH_MINING" "03" || true
+  MINTS_TRIED=$((MINTS_TRIED + 1))
+  run_and_mint "Platinum" "ethereum" "$ETH_RPC" "$ETH_MINING" "$ETH_PRIM" "03" && MINTS_OK=$((MINTS_OK + 1))
 else
   echo "  skipped: Pyth XPT feed unavailable"
 fi
 echo "=== 14d. Run + mint Session D: CrudeOil on Polygon (live Pyth WTI) ==="
 if [ -n "$WTI_8DEC" ]; then
-  run_and_mint "CrudeOil" "polygon" "$POLY_RPC" "$POLY_MINING" "04" || true
+  MINTS_TRIED=$((MINTS_TRIED + 1))
+  run_and_mint "CrudeOil" "polygon" "$POLY_RPC" "$POLY_MINING" "$POLY_PRIM" "04" && MINTS_OK=$((MINTS_OK + 1))
 else
   echo "  skipped: Pyth WTI feed unavailable (contract may be expired)"
 fi
+echo "  mint summary: $MINTS_OK/$MINTS_TRIED sessions minted and verified on-chain (balanceOf)"
 
 echo "=== 14e. Verify on-chain prices written by the BACKEND submitter (getPriceUnchecked) ==="
 # Each ended session triggers the backend OracleSubmitter to write that commodity's
@@ -426,7 +454,7 @@ cat <<BANNER
 
   ---- Seeded data (what the Overview should show) ----
   Oracle & Network : ALL FOUR live -- Gold/Silver from REAL Chainlink (mainnet fork), Platinum/CrudeOil from Pyth Hermes. No mock feeds.
-  Recent Payouts   : $PAYOUT_COUNT minted payout(s) -- Gold/ETH, Silver/POL, Platinum/ETH, CrudeOil/POL -- wei gross_prm + net USD
+  Recent Payouts   : $MINTS_OK/$MINTS_TRIED mints verified on-chain (balanceOf) -- $PAYOUT_COUNT proposal row(s) -- Gold/ETH, Silver/POL, Platinum/ETH, CrudeOil/POL
   Earnings         : all four commodities (with live feeds), net redemption USD
   Staking / Total  : Ethereum 30,000 PRM (180d) + Polygon 30,000 PRM = 60,000 staked, +boost
   Reserve Health   : $RESERVE_OK
@@ -443,3 +471,13 @@ cat <<BANNER
 BANNER
 
 rm -f "$OVERRIDE" 2>/dev/null || true
+
+# Fail loudly if any attempted mint did not actually land on-chain: the env is
+# left running for inspection, but a non-zero exit makes the failure unmissable.
+if [ "${MINTS_OK:-0}" -lt "${MINTS_TRIED:-0}" ]; then
+  echo "=================================================================="
+  echo " DEMO MINT FAILURE: only $MINTS_OK/$MINTS_TRIED mints verified on-chain."
+  echo " See the 'MINT FAILED' lines above. Env is up for inspection."
+  echo "=================================================================="
+  exit 1
+fi
