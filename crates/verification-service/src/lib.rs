@@ -1170,6 +1170,16 @@ async fn reserve(State(state): State<AppState>) -> Json<ReserveResponse> {
     })
 }
 
+/// Returns the mining-site roster from the `NODE_SITES` config (Spec §3.4): each
+/// node's geographic site as `{code, city, country}`, sorted by code for a stable
+/// order. Geography only -- no provider/vendor/datacenter identity is held or
+/// exposed. Returns an empty array when `NODE_SITES` is unset.
+async fn sites(State(state): State<AppState>) -> Json<Vec<common::NodeSite>> {
+    let mut roster: Vec<common::NodeSite> = state.node_sites.values().cloned().collect();
+    roster.sort_by(|a, b| a.code.cmp(&b.code));
+    Json(roster)
+}
+
 /// Exposes the Prometheus metrics registry in text exposition format.
 pub async fn metrics_handler() -> (StatusCode, String) {
     (StatusCode::OK, metrics::metrics_handler())
@@ -1201,6 +1211,7 @@ pub fn router(state: AppState) -> Router {
         .route("/wallets/:wallet/staking", get(wallet_staking))
         .route("/entity/share", get(entity_share))
         .route("/reserve", get(reserve))
+        .route("/sites", get(sites))
         .route("/health", get(health_check))
         .route("/metrics", get(metrics_handler))
         .layer(TraceLayer::new_for_http())
