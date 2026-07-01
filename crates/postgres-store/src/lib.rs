@@ -317,14 +317,17 @@ impl PostgresStore {
         Ok(earnings)
     }
 
-    /// Returns the total `gross_prm` (wei) across ALL mint proposals created in
-    /// the last 24 hours, as a decimal string preserving full NUMERIC precision.
-    /// Backs the backend per-day mint ceiling. `"0"` when there are none.
+    /// Returns the total `gross_prm` (wei) actually minted in the last 24 hours,
+    /// as a decimal string preserving full NUMERIC precision. Backs the backend
+    /// per-day mint ceiling, so only `status = 'Confirmed'` rows count -- PRM
+    /// truly minted on-chain, matching [`PostgresStore::company_mining_share`].
+    /// `Pending`/`Submitted`/`Rejected` proposals minted nothing and are excluded
+    /// (a never-minted proposal must not throttle real mints). `"0"` when none.
     pub async fn total_minted_wei_24h(&self) -> Result<String, PostgresStoreError> {
         let row = sqlx::query(
             "SELECT COALESCE(SUM(gross_prm), 0)::text AS total \
              FROM mint_proposals \
-             WHERE created_at > now() - interval '24 hours'",
+             WHERE status = 'Confirmed' AND created_at > now() - interval '24 hours'",
         )
         .fetch_one(&self.pool)
         .await?;
@@ -583,21 +586,42 @@ mod tests {
 
     #[tokio::test]
     #[ignore]
-    async fn test_total_minted_wei_24h_window() {
+    async fn test_total_minted_wei_24h_confirmed_and_window() {
         let store = store().await;
-        let before: u128 = store.total_minted_wei_24h().await.unwrap().parse().unwrap();
+        // The ceiling counts only actually-minted PRM in the window; clear prior
+        // rows so the assertion is exact.
+        sqlx::query("TRUNCATE mint_proposals")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+
+        // Recent + Confirmed -> counted (18e21 each, cross-chain).
         let mut recent_a = dummy_proposal("sess-mint-recent-a", Chain::Ethereum);
         recent_a.created_at = Utc::now();
         let mut recent_b = dummy_proposal("sess-mint-recent-b", Chain::Polygon);
         recent_b.created_at = Utc::now();
+        // Recent + Pending -> EXCLUDED (never minted; the flagged overcount).
+        let mut recent_pending = dummy_proposal("sess-mint-recent-pending", Chain::Ethereum);
+        recent_pending.created_at = Utc::now();
+        // Confirmed but OUTSIDE the 24h window -> EXCLUDED.
         let mut old = dummy_proposal("sess-mint-old", Chain::Ethereum);
         old.created_at = Utc::now() - chrono::Duration::days(2);
+
         store.insert_mint_proposal(&recent_a).await.unwrap();
         store.insert_mint_proposal(&recent_b).await.unwrap();
+        store.insert_mint_proposal(&recent_pending).await.unwrap();
         store.insert_mint_proposal(&old).await.unwrap();
+        for sid in ["sess-mint-recent-a", "sess-mint-recent-b", "sess-mint-old"] {
+            store
+                .update_proposal_status(&SessionId(sid.to_string()), ProposalStatus::Confirmed)
+                .await
+                .unwrap();
+        }
 
-        let after: u128 = store.total_minted_wei_24h().await.unwrap().parse().unwrap();
-        assert_eq!(after - before, 2 * 18_000_000_000_000_000_000_000u128);
+        let total: u128 = store.total_minted_wei_24h().await.unwrap().parse().unwrap();
+        // Only the two recent Confirmed rows count: recent-Pending excluded (not
+        // minted), old-Confirmed excluded (outside the window).
+        assert_eq!(total, 2 * 18_000_000_000_000_000_000_000u128);
     }
 
     async fn seed_proposal(
