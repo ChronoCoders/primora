@@ -142,6 +142,18 @@ pub struct EntityShare {
     pub share_bps: i64,
 }
 
+/// A minimal, user-safe projection of an anomaly event: the flagged session and
+/// when it was flagged. Deliberately carries NONE of the sensitive anti-cheat
+/// internals (`score`, `triggers`, `level`) so a user-facing "under review"
+/// signal can never leak which detection fired or how severe it was.
+#[derive(Debug, Clone)]
+pub struct ReviewFlag {
+    /// The flagged session (the querying wallet's own session).
+    pub session_id: String,
+    /// When the session was flagged for review.
+    pub created_at: DateTime<Utc>,
+}
+
 /// Postgres-backed store for anomaly events and mint proposals.
 pub struct PostgresStore {
     pool: sqlx::PgPool,
@@ -390,6 +402,34 @@ impl PostgresStore {
             total_prm_wei: row.try_get("total")?,
             share_bps: row.try_get("share_bps")?,
         })
+    }
+
+    /// Returns the wallet's own session review flags, newest first, capped at
+    /// `limit`. `wallet` must be debug-formatted (`format!("{:?}", _)`) to match
+    /// stored rows. Selects ONLY `session_id` and `created_at` -- the sensitive
+    /// anti-cheat columns (`score`, `triggers`, `level`) are never read, so they
+    /// cannot reach a user-facing response.
+    pub async fn get_review_flags_for_wallet(
+        &self,
+        wallet: &str,
+        limit: i64,
+    ) -> Result<Vec<ReviewFlag>, PostgresStoreError> {
+        let rows = sqlx::query(
+            "SELECT session_id, created_at FROM anomaly_events \
+             WHERE wallet = $1 ORDER BY created_at DESC LIMIT $2",
+        )
+        .bind(wallet)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut flags = Vec::with_capacity(rows.len());
+        for row in rows {
+            flags.push(ReviewFlag {
+                session_id: row.try_get("session_id")?,
+                created_at: row.try_get("created_at")?,
+            });
+        }
+        Ok(flags)
     }
 }
 

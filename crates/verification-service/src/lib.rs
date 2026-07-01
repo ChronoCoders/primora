@@ -36,6 +36,8 @@ const PRM_WEI: u128 = 1_000_000_000_000_000_000;
 const DEFAULT_PAYOUT_LIMIT: i64 = 50;
 /// Maximum number of payout rows the payouts endpoint will return.
 const MAX_PAYOUT_LIMIT: i64 = 200;
+/// Number of recent review flags and payouts folded into the wallet alerts feed.
+const ALERTS_LIMIT: i64 = 50;
 
 /// Shared application state injected into every handler.
 #[derive(Clone)]
@@ -1170,6 +1172,74 @@ async fn reserve(State(state): State<AppState>) -> Json<ReserveResponse> {
     })
 }
 
+/// A single user-facing alert about the wallet's own activity. Carries only
+/// user-safe fields: the session, a neutral `kind`, a plain-language `message`,
+/// and a timestamp. It never includes anti-cheat internals (which signal fired,
+/// the anomaly score, or the suspicion level).
+#[derive(Debug, Serialize)]
+pub struct WalletAlert {
+    /// The wallet's own session this alert concerns.
+    pub session_id: String,
+    /// Neutral category: `under_review`, `payout_confirmed`, `payout_rejected`,
+    /// or `payout_processing`. Never encodes a detection reason.
+    pub kind: String,
+    /// User-safe, plain-language description. No reason, score, or signal.
+    pub message: String,
+    /// When the alert occurred.
+    pub timestamp: chrono::DateTime<Utc>,
+}
+
+/// Maps a payout's lifecycle status to a user-safe alert kind and message. The
+/// status is the user's own payout lifecycle (not an anti-cheat internal); a
+/// rejected payout is reported without any reason.
+fn payout_alert(status: &str, commodity: &str) -> (&'static str, String) {
+    match status {
+        "Confirmed" => ("payout_confirmed", format!("Payout confirmed — PRM minted for your {commodity} session.")),
+        "Rejected" => ("payout_rejected", format!("A payout for your {commodity} session was not approved.")),
+        _ => ("payout_processing", format!("Payout for your {commodity} session is being processed.")),
+    }
+}
+
+/// Returns the connected wallet's own alerts, newest first: session review flags
+/// (a flagged session becomes a neutral "under review" alert with no reason,
+/// score, or signal) and payout lifecycle status. Strictly scoped to the
+/// requested wallet. Anti-cheat internals are never exposed; an empty array is
+/// returned honestly when the wallet has no alerts. Operator/system-wide
+/// monitoring is out of scope here (restricted admin console).
+async fn wallet_alerts(
+    State(state): State<AppState>,
+    Path(wallet): Path<String>,
+) -> Result<Json<Vec<WalletAlert>>, ApiError> {
+    let address = parse_wallet(&wallet)?;
+    let key = wallet_db_key(&address);
+    let flags = state
+        .postgres_store
+        .get_review_flags_for_wallet(&key, ALERTS_LIMIT)
+        .await?;
+    let payouts = state.postgres_store.get_payouts_for_wallet(&key, ALERTS_LIMIT).await?;
+
+    let mut alerts: Vec<WalletAlert> = Vec::with_capacity(flags.len() + payouts.len());
+    for flag in flags {
+        alerts.push(WalletAlert {
+            session_id: flag.session_id,
+            kind: "under_review".to_string(),
+            message: "A mining session is under review — any payout may be held pending verification.".to_string(),
+            timestamp: flag.created_at,
+        });
+    }
+    for payout in payouts {
+        let (kind, message) = payout_alert(&payout.status, &payout.commodity);
+        alerts.push(WalletAlert {
+            session_id: payout.session_id,
+            kind: kind.to_string(),
+            message,
+            timestamp: payout.created_at,
+        });
+    }
+    alerts.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    Ok(Json(alerts))
+}
+
 /// Returns the mining-site roster from the `NODE_SITES` config (Spec §3.4): each
 /// node's geographic site as `{code, city, country}`, sorted by code for a stable
 /// order. Geography only -- no provider/vendor/datacenter identity is held or
@@ -1209,6 +1279,7 @@ pub fn router(state: AppState) -> Router {
         .route("/wallets/:wallet/earnings/24h", get(wallet_earnings_24h))
         .route("/wallets/:wallet/sessions", get(wallet_sessions))
         .route("/wallets/:wallet/staking", get(wallet_staking))
+        .route("/wallets/:wallet/alerts", get(wallet_alerts))
         .route("/entity/share", get(entity_share))
         .route("/reserve", get(reserve))
         .route("/sites", get(sites))
