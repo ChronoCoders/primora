@@ -254,6 +254,24 @@ async fn build_house_edge_reader(rpc_url: &str) -> Option<Arc<HouseEdgeReader>> 
     }
 }
 
+/// Parses the optional `COMPANY_WALLET` env into an address (Spec §12, §4.1).
+/// Unset yields `None`; an invalid value is logged and also yields `None`. In
+/// either case the Company Mining Share endpoint reports a 0 company share rather
+/// than failing.
+fn parse_company_wallet() -> Option<Address> {
+    let raw = std::env::var("COMPANY_WALLET").ok()?;
+    match Address::from_str(&raw) {
+        Ok(addr) => {
+            tracing::info!(%addr, "company wallet configured for Company Mining Share");
+            Some(addr)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "invalid COMPANY_WALLET; Company Mining Share reports 0 company share");
+            None
+        }
+    }
+}
+
 /// Loads and validates all configuration from the environment.
 fn load_config() -> Result<Config, String> {
     let database_url = require("DATABASE_URL")?;
@@ -449,6 +467,7 @@ async fn main() {
         oracle_submitters,
         staking_readers,
         house_edge_reader,
+        company_wallet: parse_company_wallet(),
         twap_sessions: Arc::new(RwLock::new(HashMap::new())),
         node_sites: Arc::new(parse_node_sites(&optional("NODE_SITES", ""))),
         mint_ceiling_active_users: config.mint_ceiling_active_users,

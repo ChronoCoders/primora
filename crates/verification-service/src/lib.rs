@@ -74,6 +74,12 @@ pub struct AppState {
     /// Node id -> site metadata, from the `NODE_SITES` config. Empty when unset;
     /// a node absent from the map resolves to no site.
     pub node_sites: Arc<HashMap<String, common::NodeSite>>,
+    /// The public company wallet (Spec §12, §4.1): mints whose recipient equals
+    /// this address are the company's mining, distinguished by nothing else
+    /// ("company is just another miner under identical rules"). `None` when
+    /// `COMPANY_WALLET` is unset/invalid, in which case the Company Mining Share
+    /// endpoint reports a 0 company share.
+    pub company_wallet: Option<Address>,
     /// Active-user input to the per-day mint ceiling (`MINT_CEILING_ACTIVE_USERS`).
     pub mint_ceiling_active_users: u64,
     /// Average daily PRM/user input to the per-day mint ceiling
@@ -1044,6 +1050,43 @@ async fn wallet_staking(
     Ok(Json(staking_summary(&state, address).await))
 }
 
+/// Response body for the Company Mining Share endpoint (Spec §12): the company
+/// wallet's cumulative, confirmed-only share of all PRM mined, across both chains.
+#[derive(Debug, Serialize)]
+pub struct CompanyMiningShareResponse {
+    /// Confirmed PRM minted to the company wallet, base-unit wei (decimal string).
+    pub company_prm_wei: String,
+    /// Confirmed PRM minted across all wallets, base-unit wei (decimal string).
+    pub total_prm_wei: String,
+    /// Company share of confirmed mining in basis points (0..=10000); 0 when no
+    /// confirmed mints exist yet or no company wallet is configured.
+    pub share_bps: u32,
+    /// The configured company wallet (debug-formatted), or `null` when unset.
+    pub company_wallet: Option<String>,
+}
+
+/// Returns the Company Mining Share (Spec §12): the company wallet's cumulative,
+/// confirmed-only share of all PRM mined, summed across every chain. Mints are
+/// the company's when their recipient equals the configured `COMPANY_WALLET`;
+/// with none configured the company share is 0. The share is 0 until the first
+/// confirmed mint (divide-by-zero guarded in the query). The value declines as
+/// users mine, since the company mines only during the bootstrap.
+async fn entity_share(
+    State(state): State<AppState>,
+) -> Result<Json<CompanyMiningShareResponse>, ApiError> {
+    let company_key = state.company_wallet.as_ref().map(wallet_db_key);
+    let share = state
+        .postgres_store
+        .company_mining_share(company_key.as_deref().unwrap_or(""))
+        .await?;
+    Ok(Json(CompanyMiningShareResponse {
+        company_prm_wei: share.company_prm_wei,
+        total_prm_wei: share.total_prm_wei,
+        share_bps: u32::try_from(share.share_bps).unwrap_or(0),
+        company_wallet: company_key,
+    }))
+}
+
 /// Exposes the Prometheus metrics registry in text exposition format.
 pub async fn metrics_handler() -> (StatusCode, String) {
     (StatusCode::OK, metrics::metrics_handler())
@@ -1073,6 +1116,7 @@ pub fn router(state: AppState) -> Router {
         .route("/wallets/:wallet/earnings/24h", get(wallet_earnings_24h))
         .route("/wallets/:wallet/sessions", get(wallet_sessions))
         .route("/wallets/:wallet/staking", get(wallet_staking))
+        .route("/entity/share", get(entity_share))
         .route("/health", get(health_check))
         .route("/metrics", get(metrics_handler))
         .layer(TraceLayer::new_for_http())

@@ -128,6 +128,20 @@ pub struct Earnings24h {
     pub payout_count: i64,
 }
 
+/// Cumulative, confirmed-only mining totals backing the Company Mining Share KPI
+/// (Spec §12). All-time and cross-chain; `Pending`/`Submitted` proposals are
+/// excluded so only PRM actually minted on-chain counts.
+#[derive(Debug, Clone, Serialize)]
+pub struct EntityShare {
+    /// Confirmed PRM minted to the company wallet, base-unit wei (decimal string).
+    pub company_prm_wei: String,
+    /// Confirmed PRM minted to all wallets, base-unit wei (decimal string).
+    pub total_prm_wei: String,
+    /// Company share of confirmed mining in basis points (0..=10000); 0 when no
+    /// confirmed mints exist yet (divide-by-zero guarded in the query).
+    pub share_bps: i64,
+}
+
 /// Postgres-backed store for anomaly events and mint proposals.
 pub struct PostgresStore {
     pool: sqlx::PgPool,
@@ -341,6 +355,39 @@ impl PostgresStore {
             payout_count: row.try_get("payout_count")?,
         })
     }
+
+    /// Returns the cumulative, confirmed-only Company Mining Share (Spec §12):
+    /// company-wallet confirmed PRM over total confirmed PRM, all-time and across
+    /// every chain (one row per mint, no chain filter, no double-count).
+    /// `company_wallet_key` must be debug-formatted (`format!("{:?}", _)`) to
+    /// match stored `mint_proposals.wallet`. Only `status = 'Confirmed'` rows
+    /// count (actually minted on-chain); never-minted `Pending`/`Submitted`
+    /// proposals are excluded. `share_bps` is computed in arbitrary-precision
+    /// NUMERIC and divide-by-zero guarded (0 when no confirmed mints exist).
+    pub async fn company_mining_share(
+        &self,
+        company_wallet_key: &str,
+    ) -> Result<EntityShare, PostgresStoreError> {
+        let row = sqlx::query(
+            "SELECT \
+             COALESCE(SUM(gross_prm) FILTER (WHERE wallet = $1), 0)::text AS company, \
+             COALESCE(SUM(gross_prm), 0)::text AS total, \
+             COALESCE( \
+               SUM(gross_prm) FILTER (WHERE wallet = $1) * 10000 / NULLIF(SUM(gross_prm), 0), \
+               0 \
+             )::bigint AS share_bps \
+             FROM mint_proposals \
+             WHERE status = 'Confirmed'",
+        )
+        .bind(company_wallet_key)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(EntityShare {
+            company_prm_wei: row.try_get("company")?,
+            total_prm_wei: row.try_get("total")?,
+            share_bps: row.try_get("share_bps")?,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -551,5 +598,59 @@ mod tests {
 
         let after: u128 = store.total_minted_wei_24h().await.unwrap().parse().unwrap();
         assert_eq!(after - before, 2 * 18_000_000_000_000_000_000_000u128);
+    }
+
+    async fn seed_proposal(
+        store: &PostgresStore,
+        sid: &str,
+        wallet: Address,
+        gross_prm: u128,
+        chain: Chain,
+        status: ProposalStatus,
+    ) {
+        let mut p = dummy_proposal(sid, chain);
+        p.wallet = wallet;
+        p.gross_prm = gross_prm;
+        store.insert_mint_proposal(&p).await.unwrap();
+        if status != ProposalStatus::Pending {
+            store
+                .update_proposal_status(&SessionId(sid.to_string()), status)
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_company_mining_share_confirmed_only() {
+        let store = store().await;
+        // Company Mining Share is a global, all-time ratio; clear prior rows so the
+        // seeded company-vs-user split is the entire confirmed set under assertion.
+        sqlx::query("TRUNCATE mint_proposals")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        let company = Address::from([0x11u8; 20]);
+        let user = Address::from([0x22u8; 20]);
+
+        // Company confirmed = 30 (ETH) + 10 (POL) = 40, summed cross-chain.
+        seed_proposal(&store, "ems-co-eth", company, 30, Chain::Ethereum, ProposalStatus::Confirmed).await;
+        seed_proposal(&store, "ems-co-pol", company, 10, Chain::Polygon, ProposalStatus::Confirmed).await;
+        // User confirmed = 10 (ETH). Total confirmed = 50.
+        seed_proposal(&store, "ems-user-eth", user, 10, Chain::Ethereum, ProposalStatus::Confirmed).await;
+        // Company PENDING = 100: must be EXCLUDED (would skew to 140/150 if counted).
+        seed_proposal(&store, "ems-co-pending", company, 100, Chain::Ethereum, ProposalStatus::Pending).await;
+
+        let key = format!("{:?}", company);
+        let share = store.company_mining_share(&key).await.unwrap();
+        assert_eq!(share.company_prm_wei, "40");
+        assert_eq!(share.total_prm_wei, "50");
+        assert_eq!(share.share_bps, 8_000);
+
+        // No company wallet configured: company share 0, total still computed.
+        let none = store.company_mining_share("").await.unwrap();
+        assert_eq!(none.company_prm_wei, "0");
+        assert_eq!(none.total_prm_wei, "50");
+        assert_eq!(none.share_bps, 0);
     }
 }

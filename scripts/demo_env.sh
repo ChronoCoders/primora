@@ -17,6 +17,11 @@ NODE_KEY="0x0000000000000000000000000000000000000000000000000000000000000abc"
 # Backend OracleSubmitter account: Anvil account 1 (funded on the fork), DISTINCT
 # from KEY0 so on-chain TWAP submission has its own nonce space (no contention).
 SUBMITTER_KEY="0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
+# Company wallet (Spec §12, §4.1): mints to this address are the company's mining.
+# A DISTINCT user wallet mines too, so the Company Mining Share is a genuine split,
+# not trivially 100%. The user wallet is only a mint recipient (signs nothing).
+COMPANY_WALLET="$ADDR0"
+USER_ADDR="0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
 ETH_RPC="http://localhost:8545"
 POLY_RPC="http://localhost:8546"
 SERVICE="http://localhost:3000"
@@ -246,6 +251,7 @@ REDIS_URL="redis://localhost:${REDIS_HOST_PORT}" \
 BIND_ADDR="0.0.0.0:3000" \
 CHAIN_ID="31337" \
 RPC_URL="$ETH_RPC" \
+COMPANY_WALLET="$COMPANY_WALLET" \
 HOUSE_EDGE_ADDRESS="$ETH_HOUSE" \
 CHAINLINK_XAU_ADDRESS="$CHAINLINK_XAU" \
 CHAINLINK_XAG_ADDRESS="$CHAINLINK_XAG" \
@@ -296,11 +302,11 @@ done
 # a multi-sig approval fails, or the mint does not actually land on-chain -- never
 # an unconditional "minted" echo.
 run_and_mint() {
-  local commodity="$1" chain_name="$2" rpc="$3" mining="$4" prim="$5" nonce="$6"
+  local commodity="$1" chain_name="$2" rpc="$3" mining="$4" prim="$5" nonce="$6" wallet="$7"
   local commit sess sid pid bal_before bal_after
   commit=$(python3 -c "import hashlib; print(hashlib.sha256(bytes.fromhex('$nonce')).hexdigest())")
   sess=$(curl -s -X POST $SERVICE/sessions -H "Content-Type: application/json" \
-    -d "{\"wallet\":\"$ADDR0\",\"client_type\":\"desktop\",\"commodity\":\"$commodity\",\"chain\":\"$chain_name\",\"assigned_node_id\":\"node-1\",\"commit_hash\":\"$commit\",\"cpu_threads\":$CPU_THREADS}")
+    -d "{\"wallet\":\"$wallet\",\"client_type\":\"desktop\",\"commodity\":\"$commodity\",\"chain\":\"$chain_name\",\"assigned_node_id\":\"node-1\",\"commit_hash\":\"$commit\",\"cpu_threads\":$CPU_THREADS}")
   sid=$(echo "$sess" | python3 -c "import json,sys; print(json.load(sys.stdin)['session_id'])")
   curl -s -X POST $SERVICE/sessions/$sid/proofs -H "Content-Type: application/json" \
     -d "{\"sequence\":1,\"proof_hash\":\"$PROOF_HASH\",\"proof_input\":\"$PROOF_INPUT\",\"difficulty\":1}" > /dev/null
@@ -314,7 +320,7 @@ run_and_mint() {
     return 1
   fi
   pid=$(cast keccak "$sid")
-  bal_before=$(cast call "$prim" "balanceOf(address)(uint256)" "$ADDR0" --rpc-url "$rpc" | awk '{print $1}')
+  bal_before=$(cast call "$prim" "balanceOf(address)(uint256)" "$wallet" --rpc-url "$rpc" | awk '{print $1}')
   $ADMIN propose --session-id "$sid" > /dev/null 2>&1
   $ADMIN approve --proposal-id $pid --chain $chain_name > /dev/null 2>&1
   cast send $mining "approveMint(bytes32)" $pid --private-key $SIGNER1_KEY --rpc-url $rpc > /dev/null 2>&1 \
@@ -324,7 +330,7 @@ run_and_mint() {
   cast rpc evm_increaseTime 172801 --rpc-url $rpc > /dev/null
   cast rpc evm_mine --rpc-url $rpc > /dev/null
   $ADMIN execute --proposal-id $pid --chain $chain_name --session-id "$sid" > /dev/null 2>&1
-  bal_after=$(cast call "$prim" "balanceOf(address)(uint256)" "$ADDR0" --rpc-url "$rpc" | awk '{print $1}')
+  bal_after=$(cast call "$prim" "balanceOf(address)(uint256)" "$wallet" --rpc-url "$rpc" | awk '{print $1}')
   if python3 -c "import sys; sys.exit(0 if int('${bal_after:-0}') > int('${bal_before:-0}') else 1)"; then
     local minted
     minted=$(python3 -c "print((int('${bal_after:-0}') - int('${bal_before:-0}')) / 10**18)")
@@ -336,27 +342,38 @@ run_and_mint() {
 }
 
 MINTS_OK=0; MINTS_TRIED=0
-echo "=== 13. Run + mint Session A: Gold on Ethereum ==="
+echo "=== 13. Run + mint Session A: Gold on Ethereum (COMPANY) ==="
 MINTS_TRIED=$((MINTS_TRIED + 1))
-run_and_mint "Gold"   "ethereum" "$ETH_RPC"  "$ETH_MINING"  "$ETH_PRIM"  "01" && MINTS_OK=$((MINTS_OK + 1))
-echo "=== 14. Run + mint Session B: Silver on Polygon ==="
+run_and_mint "Gold"   "ethereum" "$ETH_RPC"  "$ETH_MINING"  "$ETH_PRIM"  "01" "$COMPANY_WALLET" && MINTS_OK=$((MINTS_OK + 1))
+echo "=== 14. Run + mint Session B: Silver on Polygon (USER) ==="
 MINTS_TRIED=$((MINTS_TRIED + 1))
-run_and_mint "Silver" "polygon"  "$POLY_RPC" "$POLY_MINING" "$POLY_PRIM" "02" && MINTS_OK=$((MINTS_OK + 1))
-echo "=== 14c. Run + mint Session C: Platinum on Ethereum (live Pyth XPT) ==="
+run_and_mint "Silver" "polygon"  "$POLY_RPC" "$POLY_MINING" "$POLY_PRIM" "02" "$USER_ADDR" && MINTS_OK=$((MINTS_OK + 1))
+echo "=== 14c. Run + mint Session C: Platinum on Ethereum (COMPANY, live Pyth XPT) ==="
 if [ -n "$XPT_8DEC" ]; then
   MINTS_TRIED=$((MINTS_TRIED + 1))
-  run_and_mint "Platinum" "ethereum" "$ETH_RPC" "$ETH_MINING" "$ETH_PRIM" "03" && MINTS_OK=$((MINTS_OK + 1))
+  run_and_mint "Platinum" "ethereum" "$ETH_RPC" "$ETH_MINING" "$ETH_PRIM" "03" "$COMPANY_WALLET" && MINTS_OK=$((MINTS_OK + 1))
 else
   echo "  skipped: Pyth XPT feed unavailable"
 fi
-echo "=== 14d. Run + mint Session D: CrudeOil on Polygon (live Pyth WTI) ==="
+echo "=== 14d. Run + mint Session D: CrudeOil on Polygon (COMPANY, live Pyth WTI) ==="
 if [ -n "$WTI_8DEC" ]; then
   MINTS_TRIED=$((MINTS_TRIED + 1))
-  run_and_mint "CrudeOil" "polygon" "$POLY_RPC" "$POLY_MINING" "$POLY_PRIM" "04" && MINTS_OK=$((MINTS_OK + 1))
+  run_and_mint "CrudeOil" "polygon" "$POLY_RPC" "$POLY_MINING" "$POLY_PRIM" "04" "$COMPANY_WALLET" && MINTS_OK=$((MINTS_OK + 1))
 else
   echo "  skipped: Pyth WTI feed unavailable (contract may be expired)"
 fi
 echo "  mint summary: $MINTS_OK/$MINTS_TRIED sessions minted and verified on-chain (balanceOf)"
+
+echo "=== 14f. Company Mining Share (Spec §12) -- genuine computed split from confirmed mints ==="
+# COMPANY_WALLET mined Gold/Platinum/CrudeOil; the USER wallet mined Silver. The
+# share below is whatever SUM(company confirmed)/SUM(total confirmed) actually
+# computes across both chains -- not a hardcoded or targeted value.
+curl -s "$SERVICE/entity/share" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+print(f\"  company_prm_wei={d['company_prm_wei']} total_prm_wei={d['total_prm_wei']} share_bps={d['share_bps']} ({d['share_bps']/100:.2f}%)\")
+print(f\"  company_wallet={d['company_wallet']} user_wallet=$USER_ADDR\")
+" || echo "  (entity/share unavailable)"
 
 echo "=== 14e. Verify on-chain prices written by the BACKEND submitter (getPriceUnchecked) ==="
 # Each ended session triggers the backend OracleSubmitter to write that commodity's
