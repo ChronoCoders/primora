@@ -12,7 +12,7 @@ use anomaly_engine::AnomalyEngine;
 use common::{AnomalyEvent, Chain, NodeId, NodeSite};
 use mint_ceiling::MintCeilingCalculator;
 use node_coordinator::{GrpcNodeClient, NodeCoordinator, ATTESTATION_NODE_COUNT};
-use onchain_client::{HouseEdgeReader, OnchainClient, OracleSubmitter, StakingReader};
+use onchain_client::{HouseEdgeReader, OnchainClient, OracleSubmitter, StakingReader, TreasuryReader};
 use postgres_store::PostgresStore;
 use rate_limiter::RateLimiter;
 use session_manager::SessionStore;
@@ -26,6 +26,7 @@ const DEFAULT_MINT_CEILING_ACTIVE_USERS: &str = "1000";
 const DEFAULT_MINT_CEILING_AVG_DAILY_PRM_PER_USER: &str = "500";
 const ANOMALY_CHANNEL_CAPACITY: usize = 1024;
 const HOUSE_EDGE_CACHE_TTL_SECS: u64 = 60;
+const RESERVE_CACHE_TTL_SECS: u64 = 60;
 
 /// Service configuration assembled from environment variables.
 struct Config {
@@ -227,6 +228,53 @@ async fn build_staking_readers() -> Vec<(Chain, Arc<StakingReader>)> {
     readers
 }
 
+/// Builds one [`TreasuryReader`] per configured chain for the `/reserve`
+/// endpoint's absolute USDC/USDT holdings. Configured by `{PREFIX}_TREASURY_ADDRESS`
+/// over that chain's `{PREFIX}_RPC_URL`. A chain missing either is skipped with an
+/// info log; reserve transparency is optional, so partial config is not fatal.
+async fn build_treasury_readers() -> Vec<(Chain, Arc<TreasuryReader>)> {
+    let ttl = std::time::Duration::from_secs(RESERVE_CACHE_TTL_SECS);
+    let mut readers: Vec<(Chain, Arc<TreasuryReader>)> = Vec::new();
+    let mut configured: Vec<Chain> = Vec::new();
+    for chain in Chain::all() {
+        let prefix = match chain {
+            Chain::Ethereum => "ETHEREUM",
+            Chain::Polygon => "POLYGON",
+        };
+        let rpc = std::env::var(format!("{prefix}_RPC_URL")).ok();
+        let addr = std::env::var(format!("{prefix}_TREASURY_ADDRESS")).ok();
+        match (rpc, addr) {
+            (Some(rpc), Some(addr)) => {
+                let address = match Address::from_str(&addr) {
+                    Ok(address) => address,
+                    Err(e) => {
+                        tracing::warn!(error = %e, chain = %chain, "invalid {prefix}_TREASURY_ADDRESS, skipping reserve read on this chain");
+                        continue;
+                    }
+                };
+                match TreasuryReader::new(&rpc, address, ttl).await {
+                    Ok(reader) => {
+                        readers.push((chain, Arc::new(reader)));
+                        configured.push(chain);
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, chain = %chain, "treasury reader init failed, skipping reserve read on this chain");
+                    }
+                }
+            }
+            _ => {
+                tracing::info!(chain = %chain, "treasury reader not configured (need both {prefix}_RPC_URL and {prefix}_TREASURY_ADDRESS)");
+            }
+        }
+    }
+    if configured.is_empty() {
+        tracing::info!("no treasury readers configured, /reserve returns empty");
+    } else {
+        tracing::info!(chains = ?configured, ttl_secs = RESERVE_CACHE_TTL_SECS, "treasury readers configured");
+    }
+    readers
+}
+
 /// Builds the canonical-chain [`HouseEdgeReader`] used to read the live edge for
 /// net-USD math. Configured by `HOUSE_EDGE_ADDRESS` read over the canonical
 /// `RPC_URL` (the same endpoint as the canonical oracle read, Decision #16). When
@@ -394,6 +442,7 @@ async fn main() {
 
     let oracle_submitters = build_oracle_submitters().await;
     let staking_readers = build_staking_readers().await;
+    let treasury_readers = build_treasury_readers().await;
     let house_edge_reader = build_house_edge_reader(&config.rpc_url).await;
 
     let mut node_ids: Vec<NodeId> = Vec::new();
@@ -466,6 +515,7 @@ async fn main() {
         oracle_reader: Arc::new(oracle_reader),
         oracle_submitters,
         staking_readers,
+        treasury_readers,
         house_edge_reader,
         company_wallet: parse_company_wallet(),
         twap_sessions: Arc::new(RwLock::new(HashMap::new())),

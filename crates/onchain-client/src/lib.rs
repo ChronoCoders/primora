@@ -75,6 +75,27 @@ mod house_edge_abi {
 
 use house_edge_abi::IHouseEdge;
 
+#[allow(missing_docs, dead_code, non_snake_case, clippy::all)]
+mod treasury_abi {
+    use alloy::sol;
+
+    sol! {
+        #[sol(rpc)]
+        interface ITreasury {
+            function usdc() external view returns (address);
+            function usdt() external view returns (address);
+            function totalReserveUsd() external view returns (uint256);
+            function totalRedeemedUsd() external view returns (uint256);
+        }
+        #[sol(rpc)]
+        interface IERC20Balance {
+            function balanceOf(address account) external view returns (uint256);
+        }
+    }
+}
+
+use treasury_abi::{IERC20Balance, ITreasury};
+
 /// Errors returned by the on-chain client.
 #[derive(Debug)]
 pub enum OnchainClientError {
@@ -579,6 +600,116 @@ impl HouseEdgeReader {
     }
 }
 
+/// A chain's Treasury reserve holdings, all 6-decimal stablecoin base units
+/// (divide by 1e6 for USD). Assumption-free on-chain balances -- unlike the
+/// reserve ratio, whose denominator uses the provisional PRM reference price
+/// (Spec 4.8). `usdc + usdt == total_reserve_usd` by the Treasury's own view.
+#[derive(Debug, Clone)]
+pub struct ReserveBalances {
+    /// USDC held by the Treasury, 6-decimal.
+    pub usdc: u128,
+    /// USDT held by the Treasury, 6-decimal.
+    pub usdt: u128,
+    /// Combined reserve from `Treasury.totalReserveUsd()`, 6-decimal.
+    pub total_reserve_usd: u128,
+    /// Cumulative redeemed from `Treasury.totalRedeemedUsd()`, 6-decimal.
+    pub total_redeemed_usd: u128,
+}
+
+/// A cached reserve reading with the instant it was fetched.
+struct CachedReserve {
+    balances: ReserveBalances,
+    fetched_at: Instant,
+}
+
+/// Read-only client for one chain's Treasury, exposing the absolute reserve
+/// holdings (USDC/USDT balances, the Treasury's combined total, and total
+/// redeemed to date) read live on-chain with a short in-memory cache. These are
+/// assumption-free stablecoin balances; the reserve ratio (provisional-priced
+/// via the PRM reference price, Spec 4.8) is computed elsewhere. Reads are cached
+/// for the reader's TTL to bound RPC load; the staleness window is the TTL.
+pub struct TreasuryReader {
+    provider: DynProvider,
+    treasury_address: Address,
+    ttl: Duration,
+    cache: tokio::sync::RwLock<Option<CachedReserve>>,
+}
+
+impl TreasuryReader {
+    /// Builds a read-only HTTP client bound to the Treasury at
+    /// `treasury_address`. `ttl` is the cache staleness window: holdings older
+    /// than `ttl` are refetched on the next read.
+    pub async fn new(
+        rpc_url: &str,
+        treasury_address: Address,
+        ttl: Duration,
+    ) -> Result<Self, OnchainClientError> {
+        let url = rpc_url
+            .parse()
+            .map_err(|_| OnchainClientError::InvalidUrl(rpc_url.to_string()))?;
+        let provider = ProviderBuilder::new().connect_http(url).erased();
+        Ok(Self {
+            provider,
+            treasury_address,
+            ttl,
+            cache: tokio::sync::RwLock::new(None),
+        })
+    }
+
+    /// Reads the reserve holdings fresh from chain (no cache): the USDC/USDT
+    /// token addresses from the Treasury, each token's `balanceOf(treasury)`, and
+    /// the Treasury's own `totalReserveUsd`/`totalRedeemedUsd` views.
+    async fn read_balances(&self) -> Result<ReserveBalances, OnchainClientError> {
+        let treasury = ITreasury::new(self.treasury_address, &self.provider);
+        let err = |e: alloy::contract::Error| OnchainClientError::Contract(e.to_string());
+        let usdc_addr = treasury.usdc().call().await.map_err(err)?;
+        let usdt_addr = treasury.usdt().call().await.map_err(err)?;
+        let usdc_raw = IERC20Balance::new(usdc_addr, &self.provider)
+            .balanceOf(self.treasury_address)
+            .call()
+            .await
+            .map_err(err)?;
+        let usdt_raw = IERC20Balance::new(usdt_addr, &self.provider)
+            .balanceOf(self.treasury_address)
+            .call()
+            .await
+            .map_err(err)?;
+        let total_reserve_raw = treasury.totalReserveUsd().call().await.map_err(err)?;
+        let total_redeemed_raw = treasury.totalRedeemedUsd().call().await.map_err(err)?;
+        let to_u128 = |v: U256, what: &str| {
+            u128::try_from(v)
+                .map_err(|_| OnchainClientError::Contract(format!("{what} overflows u128")))
+        };
+        Ok(ReserveBalances {
+            usdc: to_u128(usdc_raw, "usdc balance")?,
+            usdt: to_u128(usdt_raw, "usdt balance")?,
+            total_reserve_usd: to_u128(total_reserve_raw, "total reserve")?,
+            total_redeemed_usd: to_u128(total_redeemed_raw, "total redeemed")?,
+        })
+    }
+
+    /// Returns the chain's reserve holdings, serving the cached value within the
+    /// TTL and otherwise refetching from chain. The caller degrades a failed
+    /// chain to unavailable rather than failing the whole reserve response.
+    pub async fn reserve_balances(&self) -> Result<ReserveBalances, OnchainClientError> {
+        {
+            let guard = self.cache.read().await;
+            if let Some(cached) = guard.as_ref() {
+                if cached.fetched_at.elapsed() < self.ttl {
+                    return Ok(cached.balances.clone());
+                }
+            }
+        }
+        let balances = self.read_balances().await?;
+        let mut guard = self.cache.write().await;
+        *guard = Some(CachedReserve {
+            balances: balances.clone(),
+            fetched_at: Instant::now(),
+        });
+        Ok(balances)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     // Run with: cargo test -p onchain-client -- --ignored
@@ -672,6 +803,23 @@ mod tests {
         assert!((1_000..=2_500).contains(&edge));
         let cached = reader.current_edge_bps().await.unwrap();
         assert_eq!(edge, cached);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_treasury_reader_live() {
+        // Manual Anvil path: deploy via contracts/script/Deploy.s.sol, deposit
+        // reserves, then set `treasury` to the printed Treasury address.
+        let treasury: Address = "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+            .parse()
+            .unwrap();
+        let reader = TreasuryReader::new("http://localhost:8545", treasury, Duration::from_secs(60))
+            .await
+            .unwrap();
+        let a = reader.reserve_balances().await.unwrap();
+        assert_eq!(a.usdc + a.usdt, a.total_reserve_usd);
+        let cached = reader.reserve_balances().await.unwrap();
+        assert_eq!(a.total_reserve_usd, cached.total_reserve_usd);
     }
 
     #[tokio::test]

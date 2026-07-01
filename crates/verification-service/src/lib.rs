@@ -65,6 +65,9 @@ pub struct AppState {
     /// Per-chain staking readers for the combined cross-chain boost (Decision
     /// 4d). An empty vec means no staking boost is applied (boost defaults to 0).
     pub staking_readers: Vec<(common::Chain, Arc<onchain_client::StakingReader>)>,
+    /// Per-chain Treasury readers backing `GET /reserve` (absolute USDC/USDT
+    /// holdings, Spec §11.1/§12). An empty vec means `/reserve` returns no chains.
+    pub treasury_readers: Vec<(common::Chain, Arc<onchain_client::TreasuryReader>)>,
     /// Reader for the canonical-chain HouseEdge contract's live edge
     /// (`currentEdgeBps`). `None` when unconfigured, in which case net-USD math
     /// falls back to the static `payout_calculator` default edge.
@@ -1087,6 +1090,86 @@ async fn entity_share(
     }))
 }
 
+/// One chain's Treasury reserve holdings for the reserve endpoint. All amounts
+/// are 6-decimal stablecoin base units as decimal strings (divide by 1e6 for
+/// USD). `available` is false when this chain's on-chain read failed, in which
+/// case the amounts are `"0"` -- the chain is reported, not silently dropped.
+#[derive(Debug, Serialize)]
+pub struct ChainReserve {
+    /// Chain this reserve is on.
+    pub chain: Chain,
+    /// USDC held by this chain's Treasury, 6-decimal base units.
+    pub usdc: String,
+    /// USDT held by this chain's Treasury, 6-decimal base units.
+    pub usdt: String,
+    /// Combined reserve on this chain (`Treasury.totalReserveUsd`), 6-decimal.
+    pub total_usd: String,
+    /// Cumulative redeemed on this chain (`Treasury.totalRedeemedUsd`), 6-decimal.
+    pub total_redeemed_usd: String,
+    /// Whether the on-chain read for this chain succeeded.
+    pub available: bool,
+}
+
+/// Response body for the reserve endpoint (Spec §11.1/§12): absolute USDC/USDT
+/// reserve holdings per chain and combined, read live on-chain from each
+/// Treasury. Assumption-free -- unlike the reserve ratio, whose denominator uses
+/// the provisional PRM reference price. All amounts are 6-decimal base units
+/// (divide by 1e6 for USD). Combined totals sum only chains that read
+/// successfully.
+#[derive(Debug, Serialize)]
+pub struct ReserveResponse {
+    /// Per-chain holdings, one entry per configured Treasury.
+    pub chains: Vec<ChainReserve>,
+    /// Combined reserve across all available chains, 6-decimal base units.
+    pub total_reserve_usd: String,
+    /// Combined redeemed-to-date across all available chains, 6-decimal.
+    pub total_redeemed_usd: String,
+}
+
+/// Returns the absolute USDC/USDT reserve holdings per chain and combined (Spec
+/// §11.1/§12), read live on-chain from each configured Treasury (cached briefly).
+/// A chain whose read fails is reported with `available: false` and zeroed
+/// amounts rather than failing the whole response, and is excluded from the
+/// combined totals. These are assumption-free balances; the reserve ratio
+/// (provisional-priced) is served separately.
+async fn reserve(State(state): State<AppState>) -> Json<ReserveResponse> {
+    let mut chains: Vec<ChainReserve> = Vec::new();
+    let mut total_reserve: u128 = 0;
+    let mut total_redeemed: u128 = 0;
+    for (chain, reader) in &state.treasury_readers {
+        match reader.reserve_balances().await {
+            Ok(b) => {
+                total_reserve = total_reserve.saturating_add(b.total_reserve_usd);
+                total_redeemed = total_redeemed.saturating_add(b.total_redeemed_usd);
+                chains.push(ChainReserve {
+                    chain: *chain,
+                    usdc: b.usdc.to_string(),
+                    usdt: b.usdt.to_string(),
+                    total_usd: b.total_reserve_usd.to_string(),
+                    total_redeemed_usd: b.total_redeemed_usd.to_string(),
+                    available: true,
+                });
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, chain = %chain, "treasury read failed; reporting chain as unavailable");
+                chains.push(ChainReserve {
+                    chain: *chain,
+                    usdc: "0".to_string(),
+                    usdt: "0".to_string(),
+                    total_usd: "0".to_string(),
+                    total_redeemed_usd: "0".to_string(),
+                    available: false,
+                });
+            }
+        }
+    }
+    Json(ReserveResponse {
+        chains,
+        total_reserve_usd: total_reserve.to_string(),
+        total_redeemed_usd: total_redeemed.to_string(),
+    })
+}
+
 /// Exposes the Prometheus metrics registry in text exposition format.
 pub async fn metrics_handler() -> (StatusCode, String) {
     (StatusCode::OK, metrics::metrics_handler())
@@ -1117,6 +1200,7 @@ pub fn router(state: AppState) -> Router {
         .route("/wallets/:wallet/sessions", get(wallet_sessions))
         .route("/wallets/:wallet/staking", get(wallet_staking))
         .route("/entity/share", get(entity_share))
+        .route("/reserve", get(reserve))
         .route("/health", get(health_check))
         .route("/metrics", get(metrics_handler))
         .layer(TraceLayer::new_for_http())
