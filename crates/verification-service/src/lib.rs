@@ -39,6 +39,18 @@ const MAX_PAYOUT_LIMIT: i64 = 200;
 /// Number of recent review flags and payouts folded into the wallet alerts feed.
 const ALERTS_LIMIT: i64 = 50;
 
+/// Default estimate duration when the request omits one (1 hour).
+const ESTIMATE_DEFAULT_DURATION_SECS: u64 = 3_600;
+/// Nominal reference hashrate (H/s) per client type for a pre-session estimate
+/// when the wallet has no active session to draw a personal rate from. Below the
+/// per-client physical caps; the Desktop value matches the Spec §4.6 worked
+/// example (2500 H/s). Used only for the "reference" estimate basis.
+const REF_HASHRATE_DESKTOP: u64 = 2_500;
+/// Nominal reference hashrate for a CLI client (H/s).
+const REF_HASHRATE_CLI: u64 = 3_000;
+/// Nominal reference hashrate for a browser client (H/s).
+const REF_HASHRATE_BROWSER: u64 = 200;
+
 /// Shared application state injected into every handler.
 #[derive(Clone)]
 pub struct AppState {
@@ -118,6 +130,12 @@ pub struct CreateSessionRequest {
 pub struct CreateSessionResponse {
     /// Identifier of the new session.
     pub session_id: String,
+    /// The geographic site assigned to this session at creation (resolved from
+    /// `NODE_SITES` for the request's `assigned_node_id`), or `null` when none
+    /// was assigned. The node is currently the client-supplied `assigned_node_id`;
+    /// authoritative deterministic on-chain node assignment at create is a
+    /// separate future item.
+    pub assigned_site: Option<common::NodeSite>,
 }
 
 /// Request body for submitting a partial proof.
@@ -330,6 +348,7 @@ async fn create_session(
         .assigned_node_id
         .as_ref()
         .and_then(|id| state.node_sites.get(id).cloned());
+    let response_site = assigned_site.clone();
     let assigned_node_id = body.assigned_node_id.map(NodeId);
 
     let ip = peer.ip();
@@ -366,6 +385,7 @@ async fn create_session(
         StatusCode::CREATED,
         Json(CreateSessionResponse {
             session_id: session_id.0,
+            assigned_site: response_site,
         }),
     ))
 }
@@ -1240,6 +1260,172 @@ async fn wallet_alerts(
     Ok(Json(alerts))
 }
 
+/// One commodity's mining parameters for the selector/difficulty indicator.
+/// `difficulty` and `multiplier` are the STATIC base values from
+/// `payout_calculator` (the same constants the estimate uses). The weekly dynamic
+/// difficulty recompute (Spec §3.3, `New_Difficulty = Base × price ratio`) is not
+/// implemented, so these are the base values -- the UI labels them as such.
+#[derive(Debug, Serialize)]
+pub struct CommodityParams {
+    /// Commodity name (`Gold`/`Platinum`/`Silver`/`CrudeOil`).
+    pub commodity: String,
+    /// Base difficulty multiplier as a decimal string, e.g. `"4.0"`.
+    pub difficulty: String,
+    /// Payout (commodity) multiplier as a decimal string, e.g. `"3.2"`.
+    pub multiplier: String,
+}
+
+/// Formats a payout-calculator `×10`-scaled multiplier (e.g. `40`) as a decimal
+/// string (`"4.0"`).
+fn scaled10(value: u128) -> String {
+    format!("{}.{}", value / 10, value % 10)
+}
+
+/// Returns the per-commodity base difficulty and payout multiplier (Spec §3.2/§4.6)
+/// from the `payout_calculator` constants -- the single source of truth the
+/// estimate also uses. These are static base values; Spec §3.3's weekly dynamic
+/// recompute is not implemented.
+async fn commodities() -> Json<Vec<CommodityParams>> {
+    let list = [
+        Commodity::Gold,
+        Commodity::Platinum,
+        Commodity::Silver,
+        Commodity::CrudeOil,
+    ];
+    let params = list
+        .iter()
+        .map(|c| CommodityParams {
+            commodity: format!("{c:?}"),
+            difficulty: scaled10(payout_calculator::commodity_difficulty(c)),
+            multiplier: scaled10(payout_calculator::commodity_multiplier(c)),
+        })
+        .collect();
+    Json(params)
+}
+
+/// Query parameters for the earnings estimate.
+#[derive(Debug, Deserialize)]
+pub struct EstimateQuery {
+    /// Backing commodity to estimate for.
+    pub commodity: String,
+    /// Assumed session duration in seconds; defaults to one hour.
+    pub duration_secs: Option<u64>,
+    /// Optional wallet: enables a personal hashrate basis (from an active session)
+    /// and the wallet's cross-chain staking boost.
+    pub wallet: Option<String>,
+    /// Optional client type (`desktop`/`cli`/`browser`) for the reference
+    /// hashrate when no personal rate is available; defaults to desktop.
+    pub client_type: Option<String>,
+}
+
+/// A pre-session earnings estimate. `net_usd_cents` is AFTER the live house edge
+/// (Spec §12: net is the headline, never gross alone) and includes the staking
+/// boost. `is_estimate` is always true -- it depends on assumed hashrate/duration
+/// and the current spot price, not the session-end TWAP.
+#[derive(Debug, Serialize)]
+pub struct EstimateResponse {
+    /// Commodity estimated for.
+    pub commodity: String,
+    /// Hashrate (H/s) the estimate assumed.
+    pub hashrate_used: u64,
+    /// `"personal"` (from the wallet's active session) or `"reference"` (nominal).
+    pub hashrate_basis: String,
+    /// Assumed duration in seconds.
+    pub duration_secs: u64,
+    /// Live commodity spot price (8-decimal), or `null` when the oracle read
+    /// failed -- in which case `net_usd_cents` is also `null`.
+    pub spot_price: Option<String>,
+    /// The live house edge applied, in basis points.
+    pub house_edge_bps: u128,
+    /// The wallet's combined cross-chain staking boost, in basis points (0 without
+    /// a wallet or stake).
+    pub effective_boost_bps: u32,
+    /// Estimated boosted gross PRM in wei (18 decimals) as a decimal string.
+    pub gross_prm_wei: String,
+    /// Estimated NET USD after the live house edge, in cents; `null` when the
+    /// spot price was unavailable.
+    pub net_usd_cents: Option<i64>,
+    /// Always true: this is an estimate, not a guarantee.
+    pub is_estimate: bool,
+}
+
+/// Picks the estimate hashrate and its basis: the highest measured rate among the
+/// wallet's active sessions (`personal`) when available, otherwise a client-type
+/// nominal reference (`reference`). Historical per-wallet hashrate across
+/// completed sessions is not persisted, so `personal` reflects a live session.
+async fn estimate_hashrate(state: &AppState, wallet: Option<Address>, client_type: &str) -> (u64, &'static str) {
+    if let Some(addr) = wallet {
+        if let Ok(sessions) = state.session_manager.list_sessions_for_wallet(&addr.to_string()).await {
+            let best = sessions.iter().map(|s| s.avg_hashrate).max().unwrap_or(0);
+            if best > 0 {
+                return (best, "personal");
+            }
+        }
+    }
+    let reference = match client_type {
+        "cli" => REF_HASHRATE_CLI,
+        "browser" => REF_HASHRATE_BROWSER,
+        _ => REF_HASHRATE_DESKTOP,
+    };
+    (reference, "reference")
+}
+
+/// Returns a pre-session earnings estimate for a commodity (Spec §4.6), reusing
+/// `payout_calculator` (no duplicated economics) with the LIVE house edge
+/// (`HouseEdgeReader`) and LIVE commodity spot price (`oracle_reader`) -- so the
+/// estimate tracks what a real session would pay. The hashrate is the wallet's
+/// active-session rate when available, else a labeled nominal reference; the
+/// staking boost is applied when a wallet is supplied. Net is after the house
+/// edge. Never a guarantee.
+async fn estimate(
+    State(state): State<AppState>,
+    Query(params): Query<EstimateQuery>,
+) -> Result<Json<EstimateResponse>, ApiError> {
+    let commodity = parse_commodity(&params.commodity);
+    let duration_secs = params.duration_secs.unwrap_or(ESTIMATE_DEFAULT_DURATION_SECS);
+    let wallet = match params.wallet.as_deref() {
+        Some(raw) => Some(parse_wallet(raw)?),
+        None => None,
+    };
+    let client_type = params.client_type.as_deref().unwrap_or("desktop");
+    let (hashrate, basis) = estimate_hashrate(&state, wallet, client_type).await;
+
+    let config = payout_config_with_live_edge(&state).await;
+    let boost_bps = match wallet {
+        Some(addr) => staking_summary(&state, addr).await.effective_boost_bps,
+        None => 0,
+    };
+
+    let base_gross = payout_calculator::calculate_gross_prm(hashrate, duration_secs, &config, &commodity);
+    let boosted_gross = payout_calculator::apply_staking_boost(base_gross, boost_bps);
+    let gross_prm_wei = payout_calculator::gross_calib_to_wei(boosted_gross);
+
+    let (spot_price, net_usd_cents) = match state.oracle_reader.read_price(commodity).await {
+        Ok(price) => {
+            let payout = payout_calculator::calculate_payout_from_gross(boosted_gross, price, &commodity, &config);
+            let cents = i64::try_from(payout.net_usdc_scaled / NET_USDC_SCALE_TO_CENTS).ok();
+            (Some(price.to_string()), cents)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, commodity = ?commodity, "estimate: oracle price read failed; net omitted");
+            (None, None)
+        }
+    };
+
+    Ok(Json(EstimateResponse {
+        commodity: format!("{commodity:?}"),
+        hashrate_used: hashrate,
+        hashrate_basis: basis.to_string(),
+        duration_secs,
+        spot_price,
+        house_edge_bps: config.house_edge_bps,
+        effective_boost_bps: boost_bps,
+        gross_prm_wei: gross_prm_wei.to_string(),
+        net_usd_cents,
+        is_estimate: true,
+    }))
+}
+
 /// Returns the mining-site roster from the `NODE_SITES` config (Spec §3.4): each
 /// node's geographic site as `{code, city, country}`, sorted by code for a stable
 /// order. Geography only -- no provider/vendor/datacenter identity is held or
@@ -1283,6 +1469,8 @@ pub fn router(state: AppState) -> Router {
         .route("/entity/share", get(entity_share))
         .route("/reserve", get(reserve))
         .route("/sites", get(sites))
+        .route("/commodities", get(commodities))
+        .route("/estimate", get(estimate))
         .route("/health", get(health_check))
         .route("/metrics", get(metrics_handler))
         .layer(TraceLayer::new_for_http())
