@@ -5506,6 +5506,7 @@ dependencies = [
  "axum",
  "chrono",
  "common",
+ "hmac",
  "metrics",
  "mint-ceiling",
  "node-coordinator",
@@ -5518,11 +5519,13 @@ dependencies = [
  "serde",
  "serde_json",
  "session-manager",
+ "sha2",
  "tokio",
  "tower-http 0.5.2",
  "tracing",
  "tracing-subscriber",
  "twap-calculator",
+ "uuid",
 ]
 
 [[package]]

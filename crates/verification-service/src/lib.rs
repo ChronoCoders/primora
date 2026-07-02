@@ -2,9 +2,12 @@
 #![deny(missing_docs)]
 //! Axum entry point: router, application state, and request routing.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
+
+/// Admin SIWE authentication and the `/admin/*` guard.
+pub mod admin;
 
 use alloy_primitives::{Address, Signature, U256};
 use axum::extract::{ConnectInfo, Path, Query, State};
@@ -91,6 +94,18 @@ pub struct AppState {
     /// Node id -> site metadata, from the `NODE_SITES` config. Empty when unset;
     /// a node absent from the map resolves to no site.
     pub node_sites: Arc<HashMap<String, common::NodeSite>>,
+    /// Authorized admin wallet addresses for SIWE login (`ADMIN_WALLET`). Empty
+    /// disables all `/admin/*` routes (fail closed).
+    pub admin_wallets: Arc<HashSet<Address>>,
+    /// Secret used to sign admin session tokens (`ADMIN_SESSION_SECRET`). `None`
+    /// disables admin (fail closed).
+    pub admin_session_secret: Option<Arc<Vec<u8>>>,
+    /// Expected SIWE message domain (`ADMIN_DOMAIN`).
+    pub admin_domain: String,
+    /// Admin session token lifetime.
+    pub admin_session_ttl: std::time::Duration,
+    /// Single-use login nonce store.
+    pub admin_nonces: Arc<admin::NonceStore>,
     /// The public company wallet (Spec §12, §4.1): mints whose recipient equals
     /// this address are the company's mining, distinguished by nothing else
     /// ("company is just another miner under identical rules"). `None` when
@@ -1454,7 +1469,14 @@ async fn health_check() -> (StatusCode, Json<serde_json::Value>) {
 /// Routes are served behind Cloudflare on a single origin; the frontend and
 /// API share a domain, so no CORS layer is required.
 pub fn router(state: AppState) -> Router {
+    let admin_protected = Router::new()
+        .route("/admin/overview", get(admin::overview))
+        .route("/admin/logout", post(admin::logout))
+        .route_layer(axum::middleware::from_fn_with_state(state.clone(), admin::admin_guard));
     Router::new()
+        .route("/admin/nonce", get(admin::nonce))
+        .route("/admin/login", post(admin::login))
+        .merge(admin_protected)
         .route("/sessions", post(create_session))
         .route("/sessions/:session_id/proofs", post(submit_proof))
         .route("/sessions/:session_id/end", post(end_session))

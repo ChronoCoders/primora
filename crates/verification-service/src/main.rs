@@ -27,6 +27,8 @@ const DEFAULT_MINT_CEILING_AVG_DAILY_PRM_PER_USER: &str = "500";
 const ANOMALY_CHANNEL_CAPACITY: usize = 1024;
 const HOUSE_EDGE_CACHE_TTL_SECS: u64 = 60;
 const RESERVE_CACHE_TTL_SECS: u64 = 60;
+const DEFAULT_ADMIN_DOMAIN: &str = "localhost:3000";
+const DEFAULT_ADMIN_SESSION_TTL_SECS: u64 = 1800;
 
 /// Service configuration assembled from environment variables.
 struct Config {
@@ -503,6 +505,26 @@ async fn main() {
     });
     let anomaly_engine = AnomalyEngine::new(tx);
 
+    let admin_wallets = verification_service::admin::parse_admin_wallets(&optional("ADMIN_WALLET", ""));
+    let admin_session_secret = std::env::var("ADMIN_SESSION_SECRET")
+        .ok()
+        .filter(|secret| !secret.is_empty())
+        .map(|secret| Arc::new(secret.into_bytes()));
+    if admin_wallets.is_empty() || admin_session_secret.is_none() {
+        tracing::warn!("admin disabled: set both ADMIN_WALLET and ADMIN_SESSION_SECRET to enable /admin/* (fails closed otherwise)");
+    } else {
+        tracing::info!(admins = admin_wallets.len(), "admin auth enabled");
+    }
+    let admin_domain = optional("ADMIN_DOMAIN", DEFAULT_ADMIN_DOMAIN);
+    let admin_session_ttl = std::time::Duration::from_secs(
+        optional(
+            "ADMIN_SESSION_TTL_SECS",
+            &DEFAULT_ADMIN_SESSION_TTL_SECS.to_string(),
+        )
+        .parse::<u64>()
+        .unwrap_or(DEFAULT_ADMIN_SESSION_TTL_SECS),
+    );
+
     let state = AppState {
         session_manager: Arc::new(session_store),
         rate_limiter: Arc::new(rate_limiter),
@@ -517,6 +539,11 @@ async fn main() {
         staking_readers,
         treasury_readers,
         house_edge_reader,
+        admin_wallets: Arc::new(admin_wallets),
+        admin_session_secret,
+        admin_domain,
+        admin_session_ttl,
+        admin_nonces: Arc::new(verification_service::admin::NonceStore::default()),
         company_wallet: parse_company_wallet(),
         twap_sessions: Arc::new(RwLock::new(HashMap::new())),
         node_sites: Arc::new(parse_node_sites(&optional("NODE_SITES", ""))),

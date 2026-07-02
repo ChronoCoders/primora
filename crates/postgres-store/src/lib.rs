@@ -346,6 +346,15 @@ impl PostgresStore {
         Ok(row.try_get("total")?)
     }
 
+    /// Returns the total count of persisted anomaly events. Backs the admin
+    /// overview's flagged-events figure (operator view).
+    pub async fn count_anomaly_events(&self) -> Result<i64, PostgresStoreError> {
+        let row = sqlx::query("SELECT COUNT(*)::bigint AS n FROM anomaly_events")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(row.try_get("n")?)
+    }
+
     /// Returns a wallet's total earnings over the last 24 hours: summed gross PRM
     /// (wei) and net redemption USD (cents). `wallet` must be debug-formatted
     /// (`format!("{:?}", _)`) to match stored rows, identical to
